@@ -1,0 +1,11 @@
+{
+    "name": "world",
+    "dependencies": {
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0"
+    },
+    "devDependencies": {
+        "highlight.js": "11.5.1",
+        "shadow-cljs": "^3.2.1"
+    }
+}
