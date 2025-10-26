@@ -2,35 +2,87 @@
   (:require
    [clojure.string :as str]
    [re-frame.core :as rf]
+   [reagent.core :as ra]
    [reagent.dom.client :as r]))
 
-(defonce water-color
-  "#1f77b4")
+(defonce zoom (ra/atom 1.0))
+(defonce translate (ra/atom [0 0]))
+(defonce drag (ra/atom {:active? false
+                        :start [0 0]
+                        :base [0 0]}))
+(def min-zoom 1)
+(def max-zoom 20.0)
+
+(defn clamp [v a b] (-> v (max a) (min b)))
+
+(defn transform-string []
+  (let [[tx ty] @translate s @zoom]
+    (str "translate(" tx " " ty ") scale(" s ")")))
+
+(defn svg-coords [svg e]
+  (let [pt (.createSVGPoint svg)]
+    (set! (.-x pt) (.-clientX e))
+    (set! (.-y pt) (.-clientY e))
+    (let [ctm (.getScreenCTM svg)
+          inv (.inverse ctm)
+          local (.matrixTransform pt inv)]
+      [(.-x local) (.-y local)])))
+
+(defn handle-wheel [svg e]
+  (.preventDefault e)
+  (.stopPropagation e)
+  (let [[cx cy] (svg-coords svg e)
+        old @zoom
+        step 1.07
+        factor (if (pos? (.-deltaY e))
+                 (/ 1 step)
+                 step)
+        new (clamp (* old factor) min-zoom max-zoom)
+        k (/ new old)
+        [tx ty] @translate]
+    (reset! translate
+            [(+ (- (* k (- tx cx)) (- cx)))
+             (+ (- (* k (- ty cy)) (- cy)))])
+    (reset! zoom new)))
+
+(defn on-mouse-down [e]
+  (.preventDefault e)
+  (.stopPropagation e)
+  (reset! drag {:active? true
+                :start [(.-clientX e) (.-clientY e)]
+                :base @translate}))
+
+(defn on-mouse-move [e]
+  (when (:active? @drag)
+    (.preventDefault e)
+    (.stopPropagation e)
+    (let [{:keys [start base]} @drag
+          [sx sy] start
+          [bx by] base
+          dx (- (.-clientX e) sx)
+          dy (- (.-clientY e) sy)]
+      (reset! translate [(+ bx dx) (+ by dy)]))))
+
+(defn on-mouse-up [e]
+  (.preventDefault e)
+  (.stopPropagation e)
+  (swap! drag assoc :active? false))
+
+(defonce water-color "#1f77b4")
 
 (def country-colors
-  ["#9dc3c2" ; teal pastel
-   "#a7c8a0" ; soft green
-   "#c5ca91" ; muted chartreuse
-   "#e0cfa3" ; sand beige
-   "#e1b6a0" ; warm peach
-   "#d4a3a3" ; dusty rose
-   "#c4a3b5" ; mauve
-   "#b4a3c6" ; lilac
-   "#a3aad0" ; periwinkle
-   "#a3bfd8" ; calm sky blue
-   "#92bccc" ; ocean blue‑gray
-   "#8fbfb8" ; desaturated turquoise
-   "#a1c1a9" ; pistachio
-   "#c2c2a3" ; soft khaki
-   "#d3b7a3" ; rosy beige
-   "#c6aba3"]) ; clay neutral
+  ["#9dc3c2" "#a7c8a0" "#c5ca91" "#e0cfa3"
+   "#e1b6a0" "#d4a3a3" "#c4a3b5" "#b4a3c6"
+   "#a3aad0" "#a3bfd8" "#92bccc" "#8fbfb8"
+   "#a1c1a9" "#c2c2a3" "#d3b7a3" "#c6aba3"])
 
 (rf/reg-event-db
   ::set-countries
   (fn [db [_ countries]]
-    (assoc db
-           :loading? false
-           :countries countries)))
+    (let [colored (mapv #(assoc % :fill (rand-nth country-colors)) countries)]
+      (assoc db
+             :loading? false
+             :countries colored))))
 
 (rf/reg-event-fx
   ::initialize
@@ -62,27 +114,13 @@
         (.catch (fn [err]
                   (js/console.error "Failed to fetch countries:" err))))))
 
-(rf/reg-sub
-  ::countries
-  (fn [db _]
-    (:countries db)))
+(rf/reg-sub ::countries
+  (fn [db _] (:countries db)))
 
-(rf/reg-sub
-  ::loading?
-  (fn [db _]
-    (:loading? db)))
+(rf/reg-sub ::loading?
+  (fn [db _] (:loading? db)))
 
-(defonce ^:dynamic *app-root* nil)
-
-(defn app-root []
-  (when *app-root*
-    (r/unmount *app-root*))
-  (set! *app-root* (r/create-root (.getElementById js/document "app")))
-  *app-root*)
-
-(defn mercator-projection
-  "Project [lon lat] (in degrees) into [x y] for an SVG width×height box."
-  [lon lat width height]
+(defn mercator-projection [lon lat width height]
   (let [lambda (* lon (/ Math/PI 180))
         clamped-lat (max (min lat 85.0) -85.0)
         phi-clamped (* clamped-lat (/ Math/PI 180))
@@ -96,9 +134,7 @@
                      (/ phi-clamped 2))))))]
     [x y]))
 
-(defn polygon->path
-  "Convert a list of [lon lat] pairs into an SVG path string using proj-fn."
-  [proj-fn coords]
+(defn polygon->path [proj-fn coords]
   (when (seq coords)
     (str "M "
          (->> coords
@@ -108,46 +144,78 @@
               (str/join " L "))
          " Z")))
 
-(defn country->paths
-  "Convert each polygon in a country into an SVG path string."
-  [proj-fn country]
+(defn country->paths [proj-fn country]
   (map #(polygon->path proj-fn %) (:polygons country)))
 
-(defn world []
-  (let [countries @(rf/subscribe [::countries])
-        proj (fn [lon lat] (mercator-projection lon lat 1000 1000))]
-    [:svg {:version "1.1"
-           :xmlns "http://www.w3.org/2000/svg"
-           :xmlnsXlink "http://www.w3.org/1999/xlink"
-           :viewBox "0 0 1000 1000"
-           :preserveAspectRatio "xMidYMin slice"
-           :style {:width "100vw"
-                   :height "100vh"}}
-     [:rect {:x1 0
-             :y1 0
-             :width 1000
-             :height 1000
-             :style {:fill water-color}}]
+(rf/reg-sub
+  ::projected-paths
+  :<- [::countries]
+  (fn [countries [_ idx projection]]
+    (let [country (get countries idx)
+          proj-fn (case projection
+                    :mercator (fn [lon lat]
+                                (mercator-projection lon lat 1000 1000))
+                    (fn [lon lat]
+                      (mercator-projection lon lat 1000 1000)))]
+      (when country
+        (country->paths proj-fn country)))))
 
-     [:g
-      (doall
-       (map-indexed
-        (fn [i country]
-          (let [fill-color (nth country-colors (mod i (count country-colors)))]
-            (for [path (country->paths proj country)]
-              ^{:key (str (:name country) "-" (hash path))}
-              [:path {:d path
-                      :stroke "#333"
-                      :strokeWidth 0.5
-                      :fill fill-color
-                      :vectorEffect "non-scaling-stroke"}])))
-        countries))]]))
+(defn country [{:keys [idx projection]}]
+  (let [paths @(rf/subscribe [::projected-paths idx projection])
+        country (get @(rf/subscribe [::countries]) idx)]
+    [:<>
+     (for [p paths]
+       ^{:key (hash p)}
+       [:path {:d p
+               :stroke "#333"
+               :strokeWidth 0.5
+               :fill (:fill country)
+               :vectorEffect "non-scaling-stroke"}])]))
+
+(defn world []
+  (let [svg-ref (ra/atom nil)]
+    (ra/create-class
+     {:component-did-mount
+      (fn [_]
+        (when-let [svg @svg-ref]
+          (.addEventListener svg "wheel"
+                             (fn [e] (handle-wheel svg e))
+                             #js {:passive false})))
+      :reagent-render
+      (fn []
+        (let [countries @(rf/subscribe [::countries])]
+          [:svg {:ref #(reset! svg-ref %)
+                 :viewBox "0 0 1000 1000"
+                 :style {:width "100vw"
+                         :height "100vh"
+                         :cursor (if (:active? @drag)
+                                   "grabbing"
+                                   "grab")}
+                 :on-context-menu #(.preventDefault %)
+                 :on-mouse-down on-mouse-down
+                 :on-mouse-move on-mouse-move
+                 :on-mouse-up on-mouse-up
+                 :on-mouse-leave on-mouse-up}
+           [:g {:transform (transform-string)}
+            [:rect {:x 0
+                    :y 0
+                    :width 1000
+                    :height 1000
+                    :fill water-color}]
+            (for [i (range (count countries))]
+              ^{:key i} [country {:idx i
+                                  :projection :mercator}])]]))})))
+
+(defonce ^:dynamic *app-root* nil)
+
+(defn app-root []
+  (when *app-root* (r/unmount *app-root*))
+  (set! *app-root* (r/create-root (.getElementById js/document "app")))
+  *app-root*)
 
 (defn app []
   (let [loading? @(rf/subscribe [::loading?])]
-    (if loading?
-      [:p "Loading..."]
-      [world])))
+    (if loading? [:p "Loading..."] [world])))
 
 (defn ^:export init []
   (rf/dispatch-sync [::initialize])
