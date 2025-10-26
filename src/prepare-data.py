@@ -21,7 +21,7 @@ def get_polygons(country):
 
 
 def main():
-    data = gpd.read_file("data/admin-countries/ne_50m_admin_0_countries.shp")
+    data = gpd.read_file("data/admin-countries/ne_10m_admin_0_countries.shp")
 
     countries = []
     for _, country in data.iterrows():
