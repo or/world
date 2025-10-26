@@ -4,22 +4,21 @@
                       refactor-nrepl.middleware/wrap-refactor]
          :port 9700}
 
- :builds {:main
-          {:target :browser
-           :asset-path "/js/generated"
-           :js-options {:js-package-dirs ["./node_modules"]}
-           :devtools {:after-load world.core/init
-                      :http-root "./assets"
-                      :http-port 8081
-                      :preloads [devtools.preload
-                                 day8.re-frame-10x.preload.react-18]}
-           :compiler-options {:output-feature-set :es6
-                              :warnings {:redef false}
-                              :source-map true
-                              :source-map-detail-level :all}
+ :dev-http {8081 "assets"}
 
-           :modules {:main {:init-fn world.core/init
-                            :preloads [world.preload]}}
+ :builds
+ {:main
+  {:target :browser
+   :asset-path "/js/generated"
+   :output-dir "build/dev/generated"
+   :js-options {:js-package-dirs ["./node_modules"]}
 
-           :dev {:output-dir "./build/dev/generated"
-                 :compiler-options {:closure-defines {re-frame.trace.trace-enabled? true}}}}}}
+   :devtools {:after-load world.core/init
+              :preloads [devtools.preload
+                         world.preload
+                         day8.re-frame-10x.preload.react-18]}
+
+   :compiler-options {:source-map true
+                      :source-map-detail-level :all}
+
+   :modules {:main {:init-fn world.core/init}}}}}

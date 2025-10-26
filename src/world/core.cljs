@@ -1,20 +1,29 @@
 (ns world.core
   (:require
+   [clojure.string :as str]
    [re-frame.core :as rf]
    [reagent.dom.client :as r]))
 
 (defonce water-color
   "#1f77b4")
 
-(defonce colors
-  ["#ff7f0e",
-   "#2ca02c",
-   "#d62728",
-   "#9467bd",
-   "#8c564b",
-   "#e377c2",
-   "#7f7f7f",
-   "#bcbd22"])
+(def country-colors
+  ["#9dc3c2" ; teal pastel
+   "#a7c8a0" ; soft green
+   "#c5ca91" ; muted chartreuse
+   "#e0cfa3" ; sand beige
+   "#e1b6a0" ; warm peach
+   "#d4a3a3" ; dusty rose
+   "#c4a3b5" ; mauve
+   "#b4a3c6" ; lilac
+   "#a3aad0" ; periwinkle
+   "#a3bfd8" ; calm sky blue
+   "#92bccc" ; ocean blue‑gray
+   "#8fbfb8" ; desaturated turquoise
+   "#a1c1a9" ; pistachio
+   "#c2c2a3" ; soft khaki
+   "#d3b7a3" ; rosy beige
+   "#c6aba3"]) ; clay neutral
 
 (rf/reg-event-db
   ::set-countries
@@ -71,8 +80,42 @@
   (set! *app-root* (r/create-root (.getElementById js/document "app")))
   *app-root*)
 
+(defn mercator-projection
+  "Project [lon lat] (in degrees) into [x y] for an SVG width×height box."
+  [lon lat width height]
+  (let [lambda (* lon (/ Math/PI 180))
+        clamped-lat (max (min lat 85.0) -85.0)
+        phi-clamped (* clamped-lat (/ Math/PI 180))
+        x (* (/ (+ lambda Math/PI) (* 2 Math/PI)) width)
+        y-scale (/ height (* 2 Math/PI))
+        y (- (/ height 2)
+             (* y-scale
+                (Math/log
+                 (Math/tan
+                  (+ (/ Math/PI 4)
+                     (/ phi-clamped 2))))))]
+    [x y]))
+
+(defn polygon->path
+  "Convert a list of [lon lat] pairs into an SVG path string using proj-fn."
+  [proj-fn coords]
+  (when (seq coords)
+    (str "M "
+         (->> coords
+              (map (fn [[lon lat]]
+                     (let [[x y] (proj-fn lon lat)]
+                       (str x "," y))))
+              (str/join " L "))
+         " Z")))
+
+(defn country->paths
+  "Convert each polygon in a country into an SVG path string."
+  [proj-fn country]
+  (map #(polygon->path proj-fn %) (:polygons country)))
+
 (defn world []
-  (let [countries @(rf/subscribe [::countries])]
+  (let [countries @(rf/subscribe [::countries])
+        proj (fn [lon lat] (mercator-projection lon lat 1000 1000))]
     [:svg {:version "1.1"
            :xmlns "http://www.w3.org/2000/svg"
            :xmlnsXlink "http://www.w3.org/1999/xlink"
@@ -84,7 +127,21 @@
              :y1 0
              :width 1000
              :height 1000
-             :style {:fill water-color}}]]))
+             :style {:fill water-color}}]
+
+     [:g
+      (doall
+       (map-indexed
+        (fn [i country]
+          (let [fill-color (nth country-colors (mod i (count country-colors)))]
+            (for [path (country->paths proj country)]
+              ^{:key (str (:name country) "-" (hash path))}
+              [:path {:d path
+                      :stroke "#333"
+                      :strokeWidth 0.5
+                      :fill fill-color
+                      :vectorEffect "non-scaling-stroke"}])))
+        countries))]]))
 
 (defn app []
   (let [loading? @(rf/subscribe [::loading?])]
