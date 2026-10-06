@@ -201,6 +201,10 @@
   (fn [db _]
     (:projection db)))
 
+(rf/reg-sub ::south-up?
+  (fn [db _]
+    (:south-up? db)))
+
 (rf/reg-sub ::loading?
   (fn [db _]
     (nil? (:shown-resolution db))))
@@ -439,32 +443,55 @@
     [(clamp lon -180 180) lat]))
 
 ;; Center of the SVG's viewBox, which is always the center of the viewport.
+;; It's also the center of every projection (lon 0, lat 0), so the map can be
+;; rotated around it.
 (def view-center
   [500 0])
 
+(defn rotate-south-up
+  "Map coordinates <-> coordinates as shown, rotated 180° when south-up?.
+  The rotation is its own inverse, so this works in both directions."
+  [south-up? [x y]]
+  (let [[cx cy] view-center]
+    (if south-up?
+      [(- (* 2 cx) x) (- (* 2 cy) y)]
+      [x y])))
+
+(defn view-settings [db]
+  (select-keys db [:projection :south-up?]))
+
 (rf/reg-fx
   ::keep-center
-  ;; Pan so that the lon/lat at the center of the view stays there.
+  ;; Pan so that the lon/lat at the center of the view stays there, when
+  ;; switching between view settings (projection, rotation).
   (fn [[from to]]
     (let [[cx cy] view-center
           s @zoom
           [tx ty] @translate
-          [from-fn from-height] (get-projection from)
-          [to-fn to-height] (get-projection to)
-          [lon lat] (unproject from-fn
-                               (/ (- cx tx) s)
-                               (/ (- cy ty) s)
-                               1000
-                               from-height)
-          [x y] (to-fn lon lat 1000 to-height)]
+          [from-fn from-height] (get-projection (:projection from))
+          [to-fn to-height] (get-projection (:projection to))
+          [fx fy] (rotate-south-up (:south-up? from)
+                                   [(/ (- cx tx) s)
+                                    (/ (- cy ty) s)])
+          [lon lat] (unproject from-fn fx fy 1000 from-height)
+          [x y] (rotate-south-up (:south-up? to)
+                                 (to-fn lon lat 1000 to-height))]
       (reset! translate [(- cx (* s x))
                          (- cy (* s y))]))))
 
 (rf/reg-event-fx
   ::set-projection
   (fn [{:keys [db]} [_ projection]]
-    {:db (assoc db :projection projection)
-     ::keep-center [(:projection db) projection]}))
+    (let [new-db (assoc db :projection projection)]
+      {:db new-db
+       ::keep-center [(view-settings db) (view-settings new-db)]})))
+
+(rf/reg-event-fx
+  ::set-south-up
+  (fn [{:keys [db]} [_ south-up?]]
+    (let [new-db (assoc db :south-up? south-up?)]
+      {:db new-db
+       ::keep-center [(view-settings db) (view-settings new-db)]})))
 
 ;; [resolution projection] -> vector of path strings. Projecting the 10m data
 ;; takes a moment, so switching back to a projection seen before is instant.
@@ -502,7 +529,8 @@
 (defn sidebar []
   (let [projection @(rf/subscribe [::projection])
         resolution @(rf/subscribe [::resolution])
-        fetching? @(rf/subscribe [::fetching?])]
+        fetching? @(rf/subscribe [::fetching?])
+        south-up? @(rf/subscribe [::south-up?])]
     [:div {:style {:display "flex"
                    :flexDirection "column"
                    :width "220px"
@@ -528,6 +556,13 @@
       [:option {:value "robinson"} "Robinson"]
       [:option {:value "mollweide"} "Mollweide"]
       [:option {:value "eckert4"} "Eckert IV"]]
+     [:label {:style {:marginTop "8px"}}
+      [:input {:type "checkbox"
+               :checked (boolean south-up?)
+               :on-change #(rf/dispatch
+                            [::set-south-up
+                             (.. % -target -checked)])}]
+      " South up"]
      [:label {:for "resolution-select"
               :style {:marginTop "16px"
                       :marginBottom "8px"
@@ -545,6 +580,13 @@
         [:option {:value (name k)} label])]
      (when fetching?
        [:p {:style {:color "#666"}} "Loading…"])]))
+
+(defn rotated-layer []
+  (let [south-up? @(rf/subscribe [::south-up?])
+        [cx cy] view-center]
+    [:g {:transform (when south-up?
+                      (str "rotate(180 " cx " " cy ")"))}
+     [countries-layer]]))
 
 (defn world []
   (let [svg-ref (ra/atom nil)]
@@ -579,7 +621,7 @@
                    :width 1000
                    :height 1000
                    :fill water-color}]
-           [countries-layer]]]
+           [rotated-layer]]]
          [sidebar]])})))
 
 (defonce ^:dynamic *app-root*
