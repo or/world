@@ -6,7 +6,9 @@
 - To update them:
   - =uv run src/download-data.py= downloads Natural Earth's countries, map
     units and populated places into =data/=
-  - =uv run src/prepare-data.py= writes =assets/countries-{10m,50m,110m}.json=
+  - =uv run src/prepare-data.py= writes =assets/countries-{10m,50m,110m}.json=,
+    and copies the countries' flags from the =flag-icons= package (=npm
+    install=) to =assets/flags/=
 ** Deploying
 - =src/deploy.sh= builds the app and pushes it to the =gh-pages= branch, for
   GitHub Pages: https://or.github.io/world/

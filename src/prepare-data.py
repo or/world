@@ -2,7 +2,9 @@
 import json
 import math
 import re
+import shutil
 from functools import cache
+from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
@@ -497,6 +499,20 @@ def label(row, code):
     }
 
 
+# From the flag-icons package (npm install), MIT licensed
+FLAGS = Path("node_modules/flag-icons/flags/4x3")
+
+
+def copy_flags(codes):
+    """Copies the flags of these country codes to assets/flags/."""
+    assert FLAGS.exists(), f"{FLAGS} is missing: run npm install"
+    target = Path("assets/flags")
+    shutil.rmtree(target, ignore_errors=True)
+    target.mkdir()
+    for code in sorted(codes):
+        shutil.copy(FLAGS / f"{code.lower()}.svg", target)
+
+
 def iso_a2(code):
     # -99 for some disputed areas
     return None if code == "-99" else code
@@ -565,6 +581,10 @@ def main():
 
         with open(f"assets/countries-{resolution}.json", "w") as f:
             json.dump(countries, f, separators=(",", ":"))
+
+        if resolution == "10m":
+            # it has all countries and parts, the others have subsets
+            copy_flags({c["iso_a2"] for c in countries if c["iso_a2"]})
 
 
 if __name__ == "__main__":

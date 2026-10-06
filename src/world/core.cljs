@@ -910,12 +910,6 @@
      [outlines-layer]
      [highlight-layer]]))
 
-(defn flag-emoji
-  "The flag for a two-letter country code, from regional indicator symbols."
-  [iso-a2]
-  (apply str (map #(js/String.fromCodePoint (+ 0x1F1E6 (- (.charCodeAt % 0) 65)))
-                  iso-a2)))
-
 (defn format-population [n]
   (cond
     (>= n 1e9) (str (.toFixed (/ n 1e9) 2) " billion")
@@ -951,9 +945,13 @@
                           :marginTop "-2px"}}
             "Part of " part-of])]
         (when iso-a2
-          [:div {:style {:fontSize "28px"
-                         :lineHeight "1"}}
-           (flag-emoji iso-a2)])]
+          ;; images rather than emoji, which Windows has no flags for
+          [:img {:src (str "flags/" (str/lower-case iso-a2) ".svg")
+                 :alt ""
+                 :style {:height "24px"
+                         :marginTop "2px"
+                         ;; for white edges
+                         :boxShadow "0 0 0 1px rgba(0, 0, 0, 0.2)"}}])]
        (let [capital-names (for [{:keys [name note]} capitals]
                              (cond-> name
                                note (str " (" note ")")))]

@@ -30,6 +30,7 @@ mkdir -p "$site/css" "$site/js/generated"
 sed "s/__GIT-COMMIT-HASH__/$version/g" assets/index.html > "$site/index.html"
 cp assets/css/styles.css "$site/css/"
 cp assets/countries-*.json "$site/"
+cp -R assets/flags "$site/"
 cp build/release/js/generated/main.js "$site/js/generated/"
 # serve the files as they are, without GitHub's Jekyll processing
 touch "$site/.nojekyll"
