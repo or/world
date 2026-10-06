@@ -142,7 +142,7 @@
     (if (:resolution db)
       {:db db}
       {:db (assoc db
-                  :projection :mercator
+                  :projection :equal-earth
                   :datasets {}
                   :loading #{})
        :dispatch [::set-resolution :50m]})))
