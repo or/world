@@ -129,9 +129,11 @@
         lon-lat (proj/lat-at-y proj-fn (second (from-screen [cx lon-y])) 1000 height)
         lat-x (clamp (+ cx padding)
                      (+ left padding)
-                     (- right padding (* 3.5 font-size)))]
+                     (- right padding (* 3.5 font-size)))
+        lon-labels? (and (or grid? prime-meridian?)
+                         (< (js/Math.abs lon-lat) max-lat))]
     (concat
-     (when (< (js/Math.abs lon-lat) max-lat)
+     (when lon-labels?
        (for [lon (cond
                    grid? (longitudes step center)
                    prime-meridian? (prime-meridians center))
@@ -150,6 +152,12 @@
                  (and equator? (not grid?)) (conj 0))
            :let [[_ y] (to-screen [500 (second (proj-fn 0 lat 1000 height))])]
            :when (and (<= (+ top padding font-size) y (- bottom padding))
+                      ;; not on the row of longitude labels: they're below
+                      ;; lon-y, these above y
+                      (not (and lon-labels?
+                                (< (- lon-y padding)
+                                   y
+                                   (+ lon-y font-size padding font-size))))
                       ;; the label's start and end are on the map
                       (inside-map? proj-fn height (from-screen [lat-x y]))
                       (inside-map? proj-fn height
