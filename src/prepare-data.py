@@ -376,6 +376,12 @@ SEPARATE_PARTS = {
     "KQI",  # Kingman Reef
 }
 
+# Label positions (lon, lat) instead of Natural Earth's, which are mostly
+# good, but put Russia's in European Russia: this is in the middle.
+LABEL_POSITIONS = {
+    "RUS": (95.0, 63.0),
+}
+
 # Natural Earth's populated places use a different code for some countries.
 PLACE_CODES = {
     "SDS": "SSD",  # South Sudan
@@ -481,6 +487,16 @@ def area(polygons):
     return series.to_crs("EPSG:6933").area.iloc[0] / 1e6
 
 
+def label(row, code):
+    """Where to put the name on the map, and from which (web map) zoom level
+    on, from Natural Earth."""
+    x, y = LABEL_POSITIONS.get(code, (row["LABEL_X"], row["LABEL_Y"]))
+    return {
+        "label": [round(x, 3), round(y, 3)],
+        "min_label": row["MIN_LABEL"],
+    }
+
+
 def iso_a2(code):
     # -99 for some disputed areas
     return None if code == "-99" else code
@@ -516,6 +532,7 @@ def main():
                 if part_code:
                     part = parts[parts["GU_A3"] == part_code].iloc[0]
                     info = {
+                        **label(part, part_code),
                         "name": part["NAME"],
                         "long_name": part["NAME_LONG"],
                         "part_of": sovereign_names.get(
@@ -528,6 +545,7 @@ def main():
                     }
                 else:
                     info = {
+                        **label(country, code),
                         "name": country["NAME"],
                         "long_name": country["NAME_LONG"],
                         "part_of": None,

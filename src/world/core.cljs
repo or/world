@@ -130,6 +130,9 @@
                            (.-capitals c))
            :population (.-population c)
            :population-year (.-population_year c)
+           ;; where to put the name, and from which zoom level on
+           :label (.-label c)
+           :min-label (.-min_label c)
            :area (.-area c)
            ;; assigned in prepare-data.py, different from neighbours'
            :fill (.-fill c)
@@ -159,7 +162,11 @@
                          :datasets {}
                          :loading #{})
                   (select-keys saved-settings
-                               [:projection :south-up? :central-meridian :grid]))
+                               [:projection
+                                :south-up?
+                                :central-meridian
+                                :country-names?
+                                :grid]))
        :dispatch [::set-resolution (:resolution saved-settings :50m)]})))
 
 (rf/reg-event-fx
@@ -248,6 +255,15 @@
   ::set-grid-setting
   (fn [db [_ k v]]
     (assoc-in db [:grid k] v)))
+
+(rf/reg-sub ::country-names?
+  (fn [db _]
+    (:country-names? db true)))
+
+(rf/reg-event-db
+  ::set-country-names
+  (fn [db [_ country-names?]]
+    (assoc db :country-names? country-names?)))
 
 (rf/reg-sub ::south-up?
   (fn [db _]
@@ -621,6 +637,85 @@
       (when note
         [:tspan {:fontWeight "normal"} " (" note ")"])]]))
 
+(defn web-zoom
+  "The zoom level of a web map (OpenStreetMap etc.) at the same scale, which
+  is what Natural Earth's label levels are for: at level z, the world is
+  256 × 2^z pixels wide."
+  []
+  (let [[w h] @svg-size
+        ;; pixels per viewBox unit
+        scale (/ (min w h) 1000)]
+    (js/Math.log2 (/ (* 1000 @zoom scale) 256))))
+
+(defn without-overlaps
+  "The labels that fit without overlapping more important ones before them:
+  [{:x :y :font-size :text}], centered on x, y."
+  [labels]
+  (let [box (fn [{:keys [x y font-size text]}]
+              ;; roughly: characters are about 0.6 em wide on average
+              (let [half-w (/ (* 0.6 font-size (count text)) 2)
+                    half-h (/ font-size 2)]
+                [(- x half-w) (- y half-h) (+ x half-w) (+ y half-h)]))
+        overlap? (fn [[l1 t1 r1 b1] [l2 t2 r2 b2]]
+                   (and (< l1 r2) (< l2 r1) (< t1 b2) (< t2 b1)))]
+    (:placed
+     (reduce (fn [{:keys [boxes] :as acc} label]
+               (let [b (box label)]
+                 (if (some #(overlap? b %) boxes)
+                   acc
+                   (-> acc
+                       (update :placed conj label)
+                       (update :boxes conj b)))))
+             {:placed []
+              :boxes []}
+             labels))))
+
+(defn names-layer
+  "Country names, from Natural Earth's zoom level for each on, most important
+  first, leaving out those that would overlap. Growing a bit as you zoom in
+  further. In screen coordinates, to stay upright."
+  []
+  (let [countries @(rf/subscribe [::countries])
+        projection @(rf/subscribe [::projection])
+        center @(rf/subscribe [::central-meridian])
+        view (current-view @(rf/subscribe [::south-up?]))
+        [proj-fn height] (proj/get-projection projection)
+        [left top right bottom] (visible-area)
+        z (web-zoom)]
+    (when @(rf/subscribe [::country-names?])
+      [:g {:fill "#333"
+           :stroke "rgba(255, 255, 255, 0.8)"
+           :strokeWidth 3
+           :strokeLinejoin "round"
+           :paintOrder "stroke"
+           :fontWeight 600
+           :textAnchor "middle"
+           :dominantBaseline "middle"
+           :pointerEvents "none"
+           :style {:userSelect "none"}}
+       (for [{:keys [x y font-size text]}
+             (without-overlaps
+              (for [{:keys [name label min-label]}
+                    (sort-by (juxt :min-label (comp - :area)) countries)
+                    :when (>= z min-label)
+                    :let [[lon lat] label
+                          [x y] (to-screen view
+                                           (proj-fn (grid/normalize-lon
+                                                     (- lon center))
+                                                    lat
+                                                    1000
+                                                    height))]
+                    :when (and (< left x right) (< top y bottom))]
+                {:x x
+                 :y y
+                 :font-size (clamp (+ 12 (* 2 (- z min-label))) 11 18)
+                 :text name}))]
+         ^{:key text}
+         [:text {:x x
+                 :y y
+                 :fontSize font-size}
+          text])])))
+
 (defn capitals-layer
   "Markers for the hovered country's capitals. In screen coordinates, so
   they're the same size at any zoom."
@@ -715,6 +810,9 @@
                             [::set-south-up
                              (.. % -target -checked)])}]
       " South up"]
+     [checkbox "Country names"
+      @(rf/subscribe [::country-names?])
+      #(rf/dispatch [::set-country-names %])]
      [:label {:for "meridian-slider"
               :style {:marginTop "16px"
                       :marginBottom "8px"
@@ -892,6 +990,7 @@
                     :fill water-color}]
             [rotated-layer]]
            [grid-labels-layer]
+           [names-layer]
            [capitals-layer]]
           [country-info]]
          [sidebar]])})))
@@ -922,7 +1021,8 @@
 (defn valid-settings
   "The parts of saved settings that are still valid: they may be from an older
   version, or edited."
-  [{:keys [projection resolution south-up? central-meridian grid zoom translate]}]
+  [{:keys [projection resolution south-up? central-meridian country-names? grid
+           zoom translate]}]
   (let [finite? #(and (number? %) (js/isFinite %))]
     (cond-> {}
       (contains? proj/projections projection)
@@ -933,6 +1033,9 @@
 
       (boolean? south-up?)
       (assoc :south-up? south-up?)
+
+      (boolean? country-names?)
+      (assoc :country-names? country-names?)
 
       (and (finite? central-meridian) (<= -180 central-meridian 180))
       (assoc :central-meridian central-meridian)
@@ -969,6 +1072,7 @@
                                                 :resolution
                                                 :south-up?
                                                 :central-meridian
+                                                :country-names?
                                                 :grid])
                                :zoom @zoom
                                :translate @translate)))
