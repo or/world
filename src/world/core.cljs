@@ -770,9 +770,10 @@
                  :style {:display "block"
                          :width "100%"
                          :height "100%"
+                         ;; an arrow is better for pointing at countries
                          :cursor (if (:active? @drag)
                                    "grabbing"
-                                   "grab")}
+                                   "default")}
                  :on-context-menu #(.preventDefault %)
                  :on-mouse-down on-mouse-down
                  :on-mouse-move on-mouse-move
