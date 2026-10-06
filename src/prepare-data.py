@@ -241,6 +241,76 @@ def report_colors(neighbours, nearby, colors, names):
         print(f"  weight {-w:.2f}  ΔE {d:4.1f}  {a} – {b}")
 
 
+# Capitals where Natural Earth's populated places don't give a good answer:
+# countries with several capitals (it may mark a former or de facto one as
+# the capital), and dependencies whose capital it doesn't mark at all.
+CAPITALS = {
+    "ZAF": "Pretoria, Cape Town, Bloemfontein",
+    "BOL": "Sucre, La Paz",
+    "SWZ": "Mbabane, Lobamba",
+    "CIV": "Yamoussoukro",
+    "MMR": "Naypyidaw",
+    "TZA": "Dodoma",
+    "BEN": "Porto-Novo",
+    "LKA": "Sri Jayawardenepura Kotte",
+    "PSX": "Ramallah (administrative)",
+    "CYN": "North Nicosia",
+    "PRI": "San Juan",
+    "FRO": "Tórshavn",
+    "GRL": "Nuuk",
+    "JEY": "Saint Helier",
+    "GGY": "Saint Peter Port",
+    "VIR": "Charlotte Amalie",
+    "VGB": "Road Town",
+    "SXM": "Philipsburg",
+    "MAF": "Marigot",
+    "AIA": "The Valley",
+    "BLM": "Gustavia",
+    "SPM": "Saint-Pierre",
+    "MSR": "Brades (de facto)",
+    "SHN": "Jamestown",
+    "WLF": "Mata-Utu",
+    "NRU": "Yaren (de facto)",
+    "MNP": "Saipan",
+    "COK": "Avarua",
+    "NIU": "Alofi",
+    "NFK": "Kingston",
+    "PCN": "Adamstown",
+    "SGS": "King Edward Point",
+}
+
+# Natural Earth's populated places use a different code for some countries.
+PLACE_CODES = {
+    "SDS": "SSD",  # South Sudan
+}
+
+
+def find_capitals(data):
+    """Country code -> its capital(s), or none."""
+    places = gpd.read_file("data/populated-places/ne_10m_populated_places_simple.shp")
+
+    def places_of(code, feature_class):
+        code = PLACE_CODES.get(code, code)
+        return list(
+            places[
+                (places["adm0_a3"] == code) & (places["featurecla"] == feature_class)
+            ]["name"]
+        )
+
+    capitals = {}
+    for code in data["ADM0_A3"]:
+        capital = places_of(code, "Admin-0 capital")
+        # Dependencies' capitals, e.g. Nuuk for Greenland
+        region_capital = places_of(code, "Admin-0 region capital")
+        if code in CAPITALS:
+            capitals[code] = CAPITALS[code]
+        elif len(capital) == 1:
+            capitals[code] = capital[0]
+        elif len(region_capital) == 1:
+            capitals[code] = region_capital[0]
+    return capitals
+
+
 def get_ring(coords, digits):
     ring = []
     for lon, lat in coords:
@@ -272,6 +342,7 @@ def main():
     nearby = find_nearby(data, neighbours)
     colors = assign_colors(neighbours, nearby)
     report_colors(neighbours, nearby, colors, dict(zip(data["ADM0_A3"], data["NAME"])))
+    capitals = find_capitals(data)
 
     for resolution, digits in RESOLUTIONS.items():
         data = gpd.read_file(
@@ -280,9 +351,18 @@ def main():
 
         countries = []
         for _, country in data.iterrows():
+            code = country["ADM0_A3"]
             new_country = {
                 "name": country["NAME"],
-                "fill": colors[country["ADM0_A3"]],
+                "long_name": country["NAME_LONG"],
+                # -99 for some disputed areas
+                "iso_a2": None
+                if country["ISO_A2_EH"] == "-99"
+                else country["ISO_A2_EH"],
+                "capital": capitals.get(code),
+                "population": int(country["POP_EST"]) or None,
+                "population_year": int(country["POP_YEAR"]),
+                "fill": colors[code],
                 "label_position": [country["LABEL_X"], country["LABEL_Y"]],
                 "polygons": get_polygons(country, digits),
             }

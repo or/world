@@ -18,6 +18,11 @@
 (defonce svg-size
   (ra/atom [1000 1000]))
 
+;; Name of the country under the mouse. By name, as countries' indices
+;; differ between resolutions.
+(defonce hovered
+  (ra/atom nil))
+
 (defonce drag
   (ra/atom {:active? false
             :start [0 0]
@@ -107,6 +112,11 @@
   ;; points with js->clj is slow, and nothing needs them as persistent data.
   (mapv (fn [^js c]
           {:name (.-name c)
+           :long-name (.-long_name c)
+           :iso-a2 (.-iso_a2 c)
+           :capital (.-capital c)
+           :population (.-population c)
+           :population-year (.-population_year c)
            ;; assigned in prepare-data.py, different from neighbours'
            :fill (.-fill c)
            :label-position (vec (.-label_position c))
@@ -380,10 +390,12 @@
 (defn fills-layer []
   (let [countries @(rf/subscribe [::countries])
         paths @(rf/subscribe [::projected-paths])]
-    [:g
-     (for [[i {:keys [fill]}] (map-indexed vector countries)]
+    [:g {:on-mouse-over #(reset! hovered (.. % -target -dataset -name))
+         :on-mouse-leave #(reset! hovered nil)}
+     (for [[i {:keys [name fill]}] (map-indexed vector countries)]
        ^{:key i}
        [:path {:d (first (nth paths i))
+               :data-name name
                :fill fill
                :fillRule "evenodd"}])]))
 
@@ -394,11 +406,25 @@
         paths @(rf/subscribe [::projected-paths])]
     [:g {:stroke "#333"
          :strokeWidth 0.5
-         :fill "none"}
+         :fill "none"
+         :pointerEvents "none"}
      (for [i (range (count countries))]
        ^{:key i}
        [:path {:d (second (nth paths i))
                :vectorEffect "non-scaling-stroke"}])]))
+
+(defn highlight-layer []
+  (let [countries @(rf/subscribe [::countries])
+        paths @(rf/subscribe [::projected-paths])
+        name @hovered
+        i (first (keep-indexed #(when (= name (:name %2)) %1) countries))]
+    (when i
+      [:path {:d (second (nth paths i))
+              :stroke "#111"
+              :strokeWidth 2
+              :fill "none"
+              :pointerEvents "none"
+              :vectorEffect "non-scaling-stroke"}])))
 
 (defn grid-step [step]
   (if (= step :auto)
@@ -434,7 +460,7 @@
   (let [{:keys [grid? step equator? prime-meridian?]}
         @(rf/subscribe [::grid-settings])]
     [:g {:fill "none"
-         :vectorEffect "non-scaling-stroke"}
+         :pointerEvents "none"}
      (when grid?
        [:path {:d @(rf/subscribe [::grid-path (grid-step step)])
                :stroke "rgba(255, 255, 255, 0.5)"
@@ -619,7 +645,55 @@
                       (str "rotate(180 " cx " " cy ")"))}
      [fills-layer]
      [grid-layer]
-     [outlines-layer]]))
+     [outlines-layer]
+     [highlight-layer]]))
+
+(defn flag-emoji
+  "The flag for a two-letter country code, from regional indicator symbols."
+  [iso-a2]
+  (apply str (map #(js/String.fromCodePoint (+ 0x1F1E6 (- (.charCodeAt % 0) 65)))
+                  iso-a2)))
+
+(defn format-population [n]
+  (cond
+    (>= n 1e9) (str (.toFixed (/ n 1e9) 2) " billion")
+    (>= n 1e6) (str (.toFixed (/ n 1e6) 1) " million")
+    :else (.toLocaleString n "en")))
+
+(defn country-info []
+  (let [countries @(rf/subscribe [::countries])
+        name @hovered
+        {:keys [long-name iso-a2 capital population population-year]}
+        (first (filter #(= name (:name %)) countries))]
+    (when long-name
+      [:div {:style {:position "absolute"
+                     :right "16px"
+                     :bottom "16px"
+                     :minWidth "220px"
+                     :maxWidth "320px"
+                     :padding "10px 14px"
+                     :background "rgba(255, 255, 255, 0.95)"
+                     :borderRadius "6px"
+                     :boxShadow "0 2px 8px rgba(0, 0, 0, 0.3)"
+                     :fontSize "14px"
+                     :lineHeight "1.5"
+                     :pointerEvents "none"}}
+       [:div {:style {:display "flex"
+                      :justifyContent "space-between"
+                      :alignItems "flex-start"
+                      :gap "12px"}}
+        [:div {:style {:fontSize "17px"
+                       :fontWeight "bold"}}
+         long-name]
+        (when iso-a2
+          [:div {:style {:fontSize "28px"
+                         :lineHeight "1"}}
+           (flag-emoji iso-a2)])]
+       (when capital
+         [:div "Capital: " capital])
+       (when population
+         [:div "Population: " (format-population population)
+          [:span {:style {:color "#777"}} " (" population-year ")"]])])))
 
 ;; Only once per page load, not on hot reloads.
 (defonce initial-view-set?
@@ -660,25 +734,31 @@
                        :flexDirection "row"
                        :height "100vh"
                        :overflow "hidden"}}
-         [:svg {:ref #(reset! svg-ref %)
-                :viewBox "0 -500 1000 1000"
-                :style {:flex "1"
-                        :cursor (if (:active? @drag)
-                                  "grabbing"
-                                  "grab")}
-                :on-context-menu #(.preventDefault %)
-                :on-mouse-down on-mouse-down
-                :on-mouse-move on-mouse-move
-                :on-mouse-up on-mouse-up
-                :on-mouse-leave on-mouse-up}
-          [:g {:transform (transform-string)}
-           [:rect {:x 0
-                   :y -500
-                   :width 1000
-                   :height 1000
-                   :fill water-color}]
-           [rotated-layer]]
-          [grid-labels-layer]]
+         [:div {:style {:flex "1"
+                        :position "relative"
+                        :minWidth 0}}
+          [:svg {:ref #(reset! svg-ref %)
+                 :viewBox "0 -500 1000 1000"
+                 :style {:display "block"
+                         :width "100%"
+                         :height "100%"
+                         :cursor (if (:active? @drag)
+                                   "grabbing"
+                                   "grab")}
+                 :on-context-menu #(.preventDefault %)
+                 :on-mouse-down on-mouse-down
+                 :on-mouse-move on-mouse-move
+                 :on-mouse-up on-mouse-up
+                 :on-mouse-leave on-mouse-up}
+           [:g {:transform (transform-string)}
+            [:rect {:x 0
+                    :y -500
+                    :width 1000
+                    :height 1000
+                    :fill water-color}]
+            [rotated-layer]]
+           [grid-labels-layer]]
+          [country-info]]
          [sidebar]])})))
 
 (defonce ^:dynamic *app-root*
