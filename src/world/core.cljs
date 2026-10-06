@@ -147,11 +147,6 @@
                   :loading #{})
        :dispatch [::set-resolution :50m]})))
 
-(rf/reg-event-db
-  ::set-projection
-  (fn [db [_ projection]]
-    (assoc db :projection projection)))
-
 (rf/reg-event-fx
   ::set-resolution
   (fn [{:keys [db]} [_ resolution]]
@@ -383,6 +378,57 @@
    :mollweide [mollweide-projection 500]
    :eckert4 [eckert4-projection 500]})
 
+(defn get-projection [projection]
+  (get projections projection (:mercator projections)))
+
+(defn unproject
+  "Inverse of proj-fn: map coordinates -> [lon lat]. Found numerically, which
+  works for all projections here, because y depends only on latitude (and
+  decreases as it grows), and for a fixed latitude x is linear in longitude."
+  [proj-fn x y width height]
+  (let [lat (loop [lo -90
+                   hi 90
+                   i 0]
+              (let [mid (/ (+ lo hi) 2)]
+                (cond
+                  (= i 50) mid
+                  (> (second (proj-fn 0 mid width height)) y) (recur mid hi (inc i))
+                  :else (recur lo mid (inc i)))))
+        [x0] (proj-fn 0 lat width height)
+        [x180] (proj-fn 180 lat width height)
+        lon (if (== x0 x180)
+              0
+              (* 180 (/ (- x x0) (- x180 x0))))]
+    [(clamp lon -180 180) lat]))
+
+;; Center of the SVG's viewBox, which is always the center of the viewport.
+(def view-center
+  [500 0])
+
+(rf/reg-fx
+  ::keep-center
+  ;; Pan so that the lon/lat at the center of the view stays there.
+  (fn [[from to]]
+    (let [[cx cy] view-center
+          s @zoom
+          [tx ty] @translate
+          [from-fn from-height] (get-projection from)
+          [to-fn to-height] (get-projection to)
+          [lon lat] (unproject from-fn
+                               (/ (- cx tx) s)
+                               (/ (- cy ty) s)
+                               1000
+                               from-height)
+          [x y] (to-fn lon lat 1000 to-height)]
+      (reset! translate [(- cx (* s x))
+                         (- cy (* s y))]))))
+
+(rf/reg-event-fx
+  ::set-projection
+  (fn [{:keys [db]} [_ projection]]
+    {:db (assoc db :projection projection)
+     ::keep-center [(:projection db) projection]}))
+
 ;; [resolution projection] -> vector of path strings. Projecting the 10m data
 ;; takes a moment, so switching back to a projection seen before is instant.
 ;; Plain def (not defonce), so it's cleared when this file is hot-reloaded.
@@ -397,8 +443,7 @@
   (fn [[resolution countries projection] _]
     (let [k [resolution projection]]
       (or (get @path-cache k)
-          (let [[proj-fn height] (get projections projection
-                                      (:mercator projections))
+          (let [[proj-fn height] (get-projection projection)
                 paths (mapv #(country->path proj-fn % 1000 height)
                             countries)]
             (swap! path-cache assoc k paths)
