@@ -4,13 +4,19 @@
    [re-frame.core :as rf]
    [reagent.core :as ra]
    [reagent.dom.client :as r]
-   [world.clip :as clip]))
+   [world.clip :as clip]
+   [world.grid :as grid]
+   [world.projection :as proj]))
 
 (defonce zoom
   (ra/atom 1.0))
 
 (defonce translate
   (ra/atom [0 0]))
+
+;; Size of the SVG element in pixels, for what part of the viewBox is visible.
+(defonce svg-size
+  (ra/atom [1000 1000]))
 
 (defonce drag
   (ra/atom {:active? false
@@ -221,6 +227,21 @@
   (fn [db _]
     (:central-meridian db 0)))
 
+(def default-grid-settings
+  {:grid? true
+   :step :auto
+   :equator? true
+   :labels? true})
+
+(rf/reg-sub ::grid-settings
+  (fn [db _]
+    (merge default-grid-settings (:grid db))))
+
+(rf/reg-event-db
+  ::set-grid-setting
+  (fn [db [_ k v]]
+    (assoc-in db [:grid k] v)))
+
 (rf/reg-sub ::south-up?
   (fn [db _]
     (:south-up? db)))
@@ -233,186 +254,8 @@
   (fn [db _]
     (boolean (seq (:loading db)))))
 
-(defn deg->rad [d]
-  (* d (/ Math/PI 180)))
-
-(defn rad->deg [r]
-  (* r (/ 180 Math/PI)))
-
-(defn mercator-projection [lon lat width height]
-  (let [delta (deg->rad lon)
-        phi (deg->rad (max (min lat 85.0) -85.0))
-        x (* (/ (+ delta Math/PI)
-                (* 2 Math/PI))
-             width)
-        y (- (* (/ height
-                   (* 2 Math/PI))
-                (Math/log
-                 (Math/tan
-                  (+ (/ Math/PI 4)
-                     (/ phi 2))))))]
-    [x y]))
-
-(defn equirectangular-projection [lon lat width height]
-  [(* (/ (+ lon 180) 360) width)
-   (- (* (/ (- 90 lat) 180) height) (/ height 2))])
-
-(defn miller-projection [lon lat width height]
-  (let [delta (deg->rad lon)
-        phi (deg->rad (max (min lat 89.5) -89.5))
-        x (* (/ (+ delta Math/PI)
-                (* 2 Math/PI))
-             width)
-        y (- (* height
-                0.3
-                (Math/log
-                 (Math/tan
-                  (+ (/ Math/PI 4)
-                     (* 0.4 phi))))))]
-    [x y]))
-
-(defn gall-peters-projection [lon lat width height]
-  (let [phi (deg->rad lat)
-        x (* width (/ (+ lon 180) 360))
-        y (- (* (/ height (* 2 Math/PI))
-                (* 2
-                   (Math/sin phi))))]
-    [x y]))
-
-(def robinson-data
-  ;; latitude (deg), X coefficient, Y coefficient
-  [[0 1.0000 0.0000]
-   [5 0.9986 0.0620]
-   [10 0.9954 0.1240]
-   [15 0.9900 0.1860]
-   [20 0.9822 0.2480]
-   [25 0.9730 0.3100]
-   [30 0.9600 0.3720]
-   [35 0.9427 0.4340]
-   [40 0.9216 0.4958]
-   [45 0.8962 0.5571]
-   [50 0.8679 0.6176]
-   [55 0.8350 0.6769]
-   [60 0.7986 0.7346]
-   [65 0.7597 0.7903]
-   [70 0.7186 0.8435]
-   [75 0.6732 0.8936]
-   [80 0.6213 0.9394]
-   [85 0.5722 0.9761]
-   [90 0.5322 1.0000]])
-
-(defn lerp [a b t] (+ a (* (- b a) t)))
-
-(defn robinson-projection [lon lat width height]
-  (let [abs-lat (min (js/Math.abs lat) 90)
-        i (min (js/Math.floor (/ abs-lat 5))
-               (- (count robinson-data) 2))
-        [phi1 x1 y1] (nth robinson-data i)
-        [_ x2 y2] (nth robinson-data (inc i))
-        t (/ (- abs-lat phi1) 5)
-        xcoef (lerp x1 x2 t)
-        ycoef (lerp y1 y2 t)
-        delta (deg->rad lon)
-        sign (if (neg? lat) -1 1)
-        r (/ width 2)]
-    [(+ (/ width 2) (* r xcoef (/ delta Math/PI)))
-     (- (* (/ height 2) sign ycoef))]))
-
-(defn mollweide-projection [lon lat width height]
-  (let [lambda (deg->rad lon)
-        phi (deg->rad lat)
-        epsilon 1e-10
-        ;; At the poles theta = phi, and Newton would divide by f' = 0.
-        theta (if (> (js/Math.abs phi) (- (/ Math/PI 2) epsilon))
-                phi
-                (loop [t phi
-                       i 0]
-                  (let [f (- (+ (* 2 t) (js/Math.sin (* 2 t)))
-                             (* Math/PI (js/Math.sin phi)))
-                        f' (* 2 (+ 1 (js/Math.cos (* 2 t))))
-                        delta (/ f f')]
-                    (if (or (> i 30) (< (js/Math.abs delta) epsilon))
-                      t
-                      (recur (- t delta) (inc i))))))
-        x (* (/ width 4)
-             (/ (* 2) Math/PI)
-             lambda
-             (js/Math.cos theta))
-        y (* (/ height 2)
-             (js/Math.sin theta))]
-    [(+ (/ width 2) x)
-     (- y)]))
-
-(defn eckert4-projection [lon lat width height]
-  (let [lambda (deg->rad lon)
-        phi (deg->rad lat)
-        two-plus-piover2 (+ 2 (/ Math/PI 2))
-        tolerance 1e-10
-        ;; solve for theta : theta + sin(theta)*cos(theta) + 2*sin(theta)
-        ;; = (2 + pi/2) * sin(phi)
-        theta (loop [t phi
-                     i 0]
-                (let [f (- (+ t
-                              (* (js/Math.sin t)
-                                 (+ (js/Math.cos t) 2)))
-                           (* two-plus-piover2
-                              (js/Math.sin phi)))
-                      fprime (+ 1
-                                (* (js/Math.cos t)
-                                   (+ (js/Math.cos t) 2))
-                                (* (- (js/Math.sin t))
-                                   (js/Math.sin t)))]
-                  (if (or (> i 30)
-                          (< (js/Math.abs f) tolerance))
-                    t
-                    (recur (- t (/ f fprime))
-                           (inc i)))))
-        xn (* 0.6
-              lambda
-              (+ 1 (js/Math.cos theta)))
-        yn (* (js/Math.sin theta))
-        sx (/ width 8)
-        sy (/ height 2)]
-    [(+ (/ width 2) (* sx xn))
-     (- (* sy yn))]))
-
 (defn round2 [x]
   (/ (js/Math.round (* x 100)) 100))
-
-;; Šavrič, Patterson & Jenny (2018): "The Equal Earth map projection"
-(def equal-earth-a1 1.340264)
-(def equal-earth-a2 -0.081106)
-(def equal-earth-a3 0.000893)
-(def equal-earth-a4 0.003796)
-(def equal-earth-m (/ (js/Math.sqrt 3) 2))
-
-(defn equal-earth-unscaled [lambda phi]
-  (let [theta (js/Math.asin (* equal-earth-m (js/Math.sin phi)))
-        t2 (* theta theta)
-        t6 (* t2 t2 t2)
-        x (/ (* 2 (js/Math.sqrt 3) lambda (js/Math.cos theta))
-             (* 3 (+ equal-earth-a1
-                     (* 3 equal-earth-a2 t2)
-                     (* t6 (+ (* 7 equal-earth-a3)
-                              (* 9 equal-earth-a4 t2))))))
-        y (* theta
-             (+ equal-earth-a1
-                (* equal-earth-a2 t2)
-                (* t6 (+ equal-earth-a3
-                         (* equal-earth-a4 t2)))))]
-    [x y]))
-
-;; Extent of the unscaled map: x at (180°, 0°), y at the pole
-(def equal-earth-max-x
-  (first (equal-earth-unscaled Math/PI 0)))
-
-(def equal-earth-max-y
-  (second (equal-earth-unscaled 0 (/ Math/PI 2))))
-
-(defn equal-earth-projection [lon lat width height]
-  (let [[x y] (equal-earth-unscaled (deg->rad lon) (deg->rad lat))]
-    [(+ (/ width 2) (* (/ width 2 equal-earth-max-x) x))
-     (- (* (/ height 2 equal-earth-max-y) y))]))
 
 (defn push-path! [^js out proj-fn ^js points offset width height close?]
   (dotimes [i (alength points)]
@@ -437,40 +280,6 @@
               line (clip/outline-lines ring strip)]
         (push-path! outline proj-fn line offset width height false)))
     [(.join fill "") (.join outline "")]))
-
-(def projections
-  {:mercator [mercator-projection 1000]
-   :equirectangular [equirectangular-projection 500]
-   :miller [miller-projection 750]
-   :gall-peters [gall-peters-projection 650]
-   :robinson [robinson-projection 500]
-   :mollweide [mollweide-projection 500]
-   :eckert4 [eckert4-projection 500]
-   ;; equal-earth-max-x / equal-earth-max-y ≈ 2.05
-   :equal-earth [equal-earth-projection 487]})
-
-(defn get-projection [projection]
-  (get projections projection (:mercator projections)))
-
-(defn unproject
-  "Inverse of proj-fn: map coordinates -> [lon lat]. Found numerically, which
-  works for all projections here, because y depends only on latitude (and
-  decreases as it grows), and for a fixed latitude x is linear in longitude."
-  [proj-fn x y width height]
-  (let [lat (loop [lo -90
-                   hi 90
-                   i 0]
-              (let [mid (/ (+ lo hi) 2)]
-                (cond
-                  (= i 50) mid
-                  (> (second (proj-fn 0 mid width height)) y) (recur mid hi (inc i))
-                  :else (recur lo mid (inc i)))))
-        [x0] (proj-fn 0 lat width height)
-        [x180] (proj-fn 180 lat width height)
-        lon (if (== x0 x180)
-              0
-              (* 180 (/ (- x x0) (- x180 x0))))]
-    [(clamp lon -180 180) lat]))
 
 ;; Center of the SVG's viewBox, which is always the center of the viewport.
 ;; It's also the center of every projection (lon 0, lat 0), so the map can be
@@ -498,12 +307,12 @@
     (let [[cx cy] view-center
           s @zoom
           [tx ty] @translate
-          [from-fn from-height] (get-projection (:projection from))
-          [to-fn to-height] (get-projection (:projection to))
+          [from-fn from-height] (proj/get-projection (:projection from))
+          [to-fn to-height] (proj/get-projection (:projection to))
           [fx fy] (rotate-south-up (:south-up? from)
                                    [(/ (- cx tx) s)
                                     (/ (- cy ty) s)])
-          [lon lat] (unproject from-fn fx fy 1000 from-height)
+          [lon lat] (proj/unproject from-fn fx fy 1000 from-height)
           [x y] (rotate-south-up (:south-up? to)
                                  (to-fn lon lat 1000 to-height))]
       (reset! translate [(- cx (* s x))
@@ -580,7 +389,7 @@
   (fn [[resolution countries projection central-meridian] _]
     (let [k [resolution projection central-meridian]]
       (or (get-in @path-cache [:paths k])
-          (let [[proj-fn height] (get-projection projection)]
+          (let [[proj-fn height] (proj/get-projection projection)]
             (cache-paths! k (mapv #(country->paths proj-fn
                                                    %
                                                    central-meridian
@@ -588,31 +397,144 @@
                                                    height)
                                   countries)))))))
 
-(defn countries-layer []
+(defn fills-layer []
   (let [countries @(rf/subscribe [::countries])
         paths @(rf/subscribe [::projected-paths])]
-    ;; All outlines on top of all fills, so no fill covers a neighbour's
-    ;; border.
-    [:<>
-     [:g
-      (for [[i {:keys [fill]}] (map-indexed vector countries)]
-        ^{:key i}
-        [:path {:d (first (nth paths i))
-                :fill fill
-                :fillRule "evenodd"}])]
-     [:g {:stroke "#333"
-          :strokeWidth 0.5
-          :fill "none"}
-      (for [i (range (count countries))]
-        ^{:key i}
-        [:path {:d (second (nth paths i))
-                :vectorEffect "non-scaling-stroke"}])]]))
+    [:g
+     (for [[i {:keys [fill]}] (map-indexed vector countries)]
+       ^{:key i}
+       [:path {:d (first (nth paths i))
+               :fill fill
+               :fillRule "evenodd"}])]))
 
-(defn format-longitude [lon]
-  (cond
-    (or (zero? lon) (== 180 (js/Math.abs lon))) (str (js/Math.abs lon) "°")
-    (pos? lon) (str lon "°E")
-    :else (str (- lon) "°W")))
+;; Outlines go on top of all fills (and the grid), so no fill covers a
+;; neighbour's border.
+(defn outlines-layer []
+  (let [countries @(rf/subscribe [::countries])
+        paths @(rf/subscribe [::projected-paths])]
+    [:g {:stroke "#333"
+         :strokeWidth 0.5
+         :fill "none"}
+     (for [i (range (count countries))]
+       ^{:key i}
+       [:path {:d (second (nth paths i))
+               :vectorEffect "non-scaling-stroke"}])]))
+
+(defn grid-step [step]
+  (if (= step :auto)
+    (grid/auto-step @zoom)
+    step))
+
+(rf/reg-sub
+  ::grid-path
+  :<- [::projection]
+  :<- [::central-meridian]
+  (fn [[projection center] [_ step]]
+    (grid/grid-path projection center step)))
+
+(rf/reg-sub
+  ::equator-path
+  :<- [::projection]
+  (fn [projection _]
+    (grid/equator-path projection)))
+
+(defn grid-layer []
+  (let [{:keys [grid? step equator?]} @(rf/subscribe [::grid-settings])]
+    [:g {:fill "none"
+         :vectorEffect "non-scaling-stroke"}
+     (when grid?
+       [:path {:d @(rf/subscribe [::grid-path (grid-step step)])
+               :stroke "rgba(255, 255, 255, 0.5)"
+               :strokeWidth 0.5
+               :vectorEffect "non-scaling-stroke"}])
+     (when equator?
+       [:path {:d @(rf/subscribe [::equator-path])
+               :stroke "rgba(255, 255, 255, 0.9)"
+               :strokeWidth 1.5
+               :vectorEffect "non-scaling-stroke"}])]))
+
+(defn visible-area
+  "The part of the viewBox that's visible: [left top right bottom]. The SVG
+  scales the viewBox to fit and centers it."
+  []
+  (let [[w h] @svg-size
+        [cx cy] view-center
+        k (min (/ w 1000) (/ h 1000))
+        half-w (/ w k 2)
+        half-h (/ h k 2)]
+    [(- cx half-w) (- cy half-h) (+ cx half-w) (+ cy half-h)]))
+
+(defn grid-labels-layer []
+  (let [{:keys [grid? step equator? labels?]} @(rf/subscribe [::grid-settings])
+        projection @(rf/subscribe [::projection])
+        center @(rf/subscribe [::central-meridian])
+        south-up? @(rf/subscribe [::south-up?])
+        s @zoom
+        [tx ty] @translate]
+    (when (and labels? (or grid? equator?))
+      [:g {:fontSize grid/font-size
+           :fill "#222"
+           :stroke "rgba(255, 255, 255, 0.8)"
+           :strokeWidth 3
+           :strokeLinejoin "round"
+           :paintOrder "stroke"
+           :pointerEvents "none"
+           :style {:userSelect "none"}}
+       (for [{:keys [key x y text anchor baseline]}
+             (grid/labels
+              {:projection projection
+               :center center
+               :step (grid-step step)
+               :grid? grid?
+               :equator? equator?
+               :to-screen (fn [p]
+                            (let [[x y] (rotate-south-up south-up? p)]
+                              [(+ tx (* s x)) (+ ty (* s y))]))
+               :from-screen (fn [[x y]]
+                              (rotate-south-up south-up?
+                                               [(/ (- x tx) s)
+                                                (/ (- y ty) s)]))
+               :visible (visible-area)})]
+         ^{:key key}
+         [:text {:x x
+                 :y y
+                 :textAnchor anchor
+                 :dominantBaseline baseline}
+          text])])))
+
+(defn checkbox [label checked? on-change]
+  [:label {:style {:marginTop "8px"}}
+   [:input {:type "checkbox"
+            :checked (boolean checked?)
+            :on-change #(on-change (.. % -target -checked))}]
+   " " label])
+
+(defn grid-settings []
+  (let [{:keys [grid? step equator? labels?]} @(rf/subscribe [::grid-settings])
+        set-setting #(rf/dispatch [::set-grid-setting %1 %2])]
+    [:<>
+     [:div {:style {:marginTop "16px"
+                    :fontWeight "bold"}}
+      "Grid:"]
+     [:div {:style {:display "flex"
+                    :alignItems "center"
+                    :gap "8px"}}
+      [checkbox "Lines every" grid? #(set-setting :grid? %)]
+      [:select {:value (if (= step :auto) "auto" (str step))
+                :disabled (not grid?)
+                :on-change #(let [v (.. % -target -value)]
+                              (set-setting :step (if (= v "auto")
+                                                   :auto
+                                                   (js/parseInt v))))
+                :style {:marginTop "8px"
+                        :padding "2px"
+                        :fontSize "14px"}}
+       [:option {:value "auto"} "auto"]
+       (for [step (reverse grid/steps)]
+         ^{:key step}
+         [:option {:value (str step)} (str step "°")])]]
+     [checkbox "Equator" equator? #(set-setting :equator? %)]
+     [checkbox "Labels" labels? #(set-setting :labels? %)]]))
 
 (defn sidebar []
   (let [projection @(rf/subscribe [::projection])
@@ -656,7 +578,7 @@
               :style {:marginTop "16px"
                       :marginBottom "8px"
                       :fontWeight "bold"}}
-      "Central meridian: " (format-longitude central-meridian)]
+      "Central meridian: " (grid/format-longitude central-meridian)]
      [:input {:id "meridian-slider"
               :type "range"
               :min -180
@@ -691,14 +613,17 @@
         ^{:key k}
         [:option {:value (name k)} label])]
      (when fetching?
-       [:p {:style {:color "#666"}} "Loading…"])]))
+       [:p {:style {:color "#666"}} "Loading…"])
+     [grid-settings]]))
 
 (defn rotated-layer []
   (let [south-up? @(rf/subscribe [::south-up?])
         [cx cy] view-center]
     [:g {:transform (when south-up?
                       (str "rotate(180 " cx " " cy ")"))}
-     [countries-layer]]))
+     [fills-layer]
+     [grid-layer]
+     [outlines-layer]]))
 
 (defn world []
   (let [svg-ref (ra/atom nil)]
@@ -709,7 +634,12 @@
           (.addEventListener svg
                              "wheel"
                              (fn [e] (handle-wheel svg e))
-                             #js {:passive false})))
+                             #js {:passive false})
+          (.observe (js/ResizeObserver.
+                     (fn [entries]
+                       (let [rect (.-contentRect (aget entries 0))]
+                         (reset! svg-size [(.-width rect) (.-height rect)]))))
+                    svg)))
       :reagent-render
       (fn []
         [:div {:style {:display "flex"
@@ -733,7 +663,8 @@
                    :width 1000
                    :height 1000
                    :fill water-color}]
-           [rotated-layer]]]
+           [rotated-layer]]
+          [grid-labels-layer]]
          [sidebar]])})))
 
 (defonce ^:dynamic *app-root*
