@@ -46,6 +46,11 @@ PALETTE = [
     "#99a67b",
 ]
 
+# Countries with a fixed colour, outside the palette: country code -> colour.
+FIXED_COLORS = {
+    "ATA": "#ffffff",  # Antarctica, white as ice
+}
+
 # Countries closer than this count as neighbours: besides land borders, this
 # includes narrow straits (Dover, Gibraltar, Øresund...), where countries look
 # adjacent on the map.
@@ -128,9 +133,9 @@ def assign_colors(neighbours, nearby):
     MIN_NEARBY_WEIGHT). Remaining ties go to the least used colour overall, to
     use the whole palette. If no colour is clearly different from the
     neighbours', it gets the one furthest from them. Then each country's colour
-    is improved, given all others.
+    is improved, given all others. Countries in FIXED_COLORS keep theirs.
     """
-    colors = {}
+    colors = dict(FIXED_COLORS)
     usage = {c: 0 for c in PALETTE}
     difference = cache(delta_e)
     siblings = find_siblings(neighbours)
@@ -188,7 +193,7 @@ def assign_colors(neighbours, nearby):
     # until nothing changes.
     for _ in range(20):
         changed = False
-        for code in sorted(neighbours):
+        for code in sorted(neighbours.keys() - FIXED_COLORS.keys()):
             usage[colors[code]] -= 1
             color = best_color(code)
             usage[color] += 1
