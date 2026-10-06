@@ -111,8 +111,8 @@
 
 (defn labels
   "Grid labels in screen (viewBox) coordinates. Longitudes go along the
-  equator, latitudes along the central meridian. Either is moved to the edge
-  of the view when its line is out of view.
+  equator, latitudes along the prime meridian. Either is moved to the edge of
+  the view when its line is out of view.
 
   to-screen and from-screen convert between map and screen coordinates;
   visible is the visible area in screen coordinates: [left top right bottom]."
@@ -127,9 +127,9 @@
                      (+ top padding)
                      (- bottom padding font-size))
         lon-lat (proj/lat-at-y proj-fn (second (from-screen [cx lon-y])) 1000 height)
-        lat-x (clamp (+ cx padding)
-                     (+ left padding)
-                     (- right padding (* 3.5 font-size)))
+        ;; The prime meridian, relative to the central one. When the map is
+        ;; centered on 180°, it's on both edges: this is the left one.
+        prime-lon (normalize-lon (- center))
         lon-labels? (and (or grid? prime-meridian?)
                          (< (js/Math.abs lon-lat) max-lat))]
     (concat
@@ -150,7 +150,12 @@
           :baseline "hanging"}))
      (for [lat (cond-> (if grid? (latitudes step max-lat) [])
                  (and equator? (not grid?)) (conj 0))
-           :let [[_ y] (to-screen [500 (second (proj-fn 0 lat 1000 height))])]
+           ;; The prime meridian may be curved: where it crosses this
+           ;; latitude.
+           :let [[x y] (to-screen (proj-fn prime-lon lat 1000 height))
+                 lat-x (clamp (+ x padding)
+                              (+ left padding)
+                              (- right padding (* 3.5 font-size)))]
            :when (and (<= (+ top padding font-size) y (- bottom padding))
                       ;; not on the row of longitude labels: they're below
                       ;; lon-y, these above y
