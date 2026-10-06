@@ -520,14 +520,14 @@
                              (keyword (.. % -target -value))])
                :style {:padding "4px"
                        :fontSize "14px"}}
+      [:option {:value "equal-earth"} "Equal Earth"]
       [:option {:value "mercator"} "Mercator"]
       [:option {:value "equirectangular"} "Equirectangular"]
       [:option {:value "miller"} "Miller"]
       [:option {:value "gall-peters"} "Gall–Peters"]
       [:option {:value "robinson"} "Robinson"]
       [:option {:value "mollweide"} "Mollweide"]
-      [:option {:value "eckert4"} "Eckert IV"]
-      [:option {:value "equal-earth"} "Equal Earth"]]
+      [:option {:value "eckert4"} "Eckert IV"]]
      [:label {:for "resolution-select"
               :style {:marginTop "16px"
                       :marginBottom "8px"
