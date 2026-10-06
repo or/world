@@ -34,7 +34,7 @@
   1)
 
 (def max-zoom
-  80.0)
+  100.0)
 
 (defn clamp [v a b]
   (-> v (max a) (min b)))
