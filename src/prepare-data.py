@@ -5,7 +5,8 @@ import re
 from functools import cache
 
 import geopandas as gpd
-from shapely.geometry.polygon import Polygon
+import pandas as pd
+from shapely.geometry import MultiPolygon, Polygon
 
 from color_difference import delta_e
 
@@ -266,6 +267,19 @@ CAPITALS = {
     "TZA": ["Dodoma"],
     "KAZ": ["Astana"],
     "PLW": ["Ngerulmud"],
+    # separately shown parts of countries
+    "GUF": ["Cayenne"],
+    "MTQ": ["Fort-de-France"],
+    "GLP": ["Basse-Terre"],
+    "REU": ["Saint-Denis"],
+    "MYT": ["Mamoudzou"],
+    "PAZ": ["Ponta Delgada"],
+    "PMD": ["Funchal"],
+    "NSV": ["Longyearbyen"],
+    "NLY": ["Kralendijk"],
+    "TZZ": ["Zanzibar City"],
+    "CCK": ["West Island"],
+    "CXR": ["Flying Fish Cove"],
     "PSX": ["Ramallah (administrative)"],
     "CYN": ["North Nicosia"],
     "PRI": ["San Juan"],
@@ -295,6 +309,14 @@ CAPITALS = {
 # Coordinates (lat, lon) of capitals in CAPITALS that aren't in Natural
 # Earth's populated places.
 CAPITAL_LOCATIONS = {
+    "Basse-Terre": (16.00, -61.73),
+    "Saint-Denis": (-20.88, 55.45),
+    "Mamoudzou": (-12.78, 45.23),
+    "Kralendijk": (12.15, -68.27),
+    "Zanzibar City": (-6.16, 39.20),
+    "West Island": (-12.19, 96.83),
+    "Flying Fish Cove": (-10.42, 105.68),
+    "Longyearbyen": (78.22, 15.55),
     "Astana": (51.17, 71.43),
     "Ngerulmud": (7.50, 134.62),
     "North Nicosia": (35.18, 33.36),
@@ -317,14 +339,52 @@ CAPITAL_LOCATIONS = {
     "King Edward Point": (-54.28, -36.49),
 }
 
+# Parts of countries shown separately, e.g. French Guiana (France): overseas
+# parts and outlying islands, by their code in Natural Earth's map units.
+# Not internal regions such as Scotland or Flanders. They keep the colour of
+# their country.
+SEPARATE_PARTS = {
+    # France
+    "GUF",  # French Guiana
+    "MTQ",  # Martinique
+    "GLP",  # Guadeloupe
+    "REU",  # Réunion
+    "MYT",  # Mayotte
+    # Portugal
+    "PAZ",  # Azores
+    "PMD",  # Madeira
+    # Norway
+    "NSV",  # Svalbard
+    "NJM",  # Jan Mayen
+    "BVT",  # Bouvet Island
+    # others
+    "NLY",  # Caribbean Netherlands
+    "TKL",  # Tokelau (New Zealand)
+    "TZZ",  # Zanzibar (Tanzania)
+    "CCK",  # Cocos Islands (Australia)
+    "CXR",  # Christmas Island (Australia)
+    "PFA",  # Paracel Islands (China)
+    # US Minor Outlying Islands
+    "JQI",  # Johnston Atoll
+    "DQI",  # Jarvis Island
+    "FQI",  # Baker Island
+    "HQI",  # Howland Island
+    "WQI",  # Wake Atoll
+    "MQI",  # Midway Islands
+    "BQI",  # Navassa Island
+    "LQI",  # Palmyra Atoll
+    "KQI",  # Kingman Reef
+}
+
 # Natural Earth's populated places use a different code for some countries.
 PLACE_CODES = {
     "SDS": "SSD",  # South Sudan
 }
 
 
-def find_capitals(data):
-    """Country code -> its capitals: [{name, note, lat, lon}], maybe none."""
+def find_capitals(data, parts):
+    """Country or part code -> its capitals: [{name, note, lat, lon}], maybe
+    none."""
     places = gpd.read_file("data/populated-places/ne_10m_populated_places_simple.shp")
 
     def places_of(code, feature_class=None):
@@ -340,11 +400,11 @@ def find_capitals(data):
     def from_place(place):
         return capital(place["name"], None, place["latitude"], place["longitude"])
 
-    def from_table(code, entry):
+    def from_table(codes, entry):
         name, note = re.fullmatch(r"(.*?)(?: \((.*)\))?", entry).groups()
         if name in CAPITAL_LOCATIONS:
             return capital(name, note, *CAPITAL_LOCATIONS[name])
-        place = places_of(code)
+        place = pd.concat(places_of(code) for code in codes)
         place = place[place["name"] == name]
         assert len(place) == 1, f"{name}: add it to CAPITAL_LOCATIONS"
         return {**from_place(place.iloc[0]), "note": note}
@@ -355,13 +415,19 @@ def find_capitals(data):
         # Dependencies' capitals, e.g. Nuuk for Greenland
         region_capitals = places_of(code, "Admin-0 region capital")
         if code in CAPITALS:
-            capitals[code] = [from_table(code, entry) for entry in CAPITALS[code]]
+            capitals[code] = [from_table([code], entry) for entry in CAPITALS[code]]
         elif len(capital_places) == 1:
             capitals[code] = [from_place(capital_places.iloc[0])]
         elif len(region_capitals) == 1:
             capitals[code] = [from_place(region_capitals.iloc[0])]
         else:
             capitals[code] = []
+    for _, part in parts.iterrows():
+        # Their capitals are in their country's places, e.g. Cayenne in France's
+        codes = [part["GU_A3"], part["ADM0_A3"]]
+        capitals[part["GU_A3"]] = [
+            from_table(codes, entry) for entry in CAPITALS.get(part["GU_A3"], [])
+        ]
     return capitals
 
 
@@ -374,18 +440,50 @@ def get_ring(coords, digits):
     return ring
 
 
-def get_polygons(country, digits):
+def get_polygons(polygons, digits):
     """A list of polygons, each a list of rings: exterior first, then holes."""
-    geometry = country["geometry"]
-    polys = [geometry] if isinstance(geometry, Polygon) else geometry.geoms
-
-    polygons = []
-    for p in polys:
+    result = []
+    for p in polygons:
         rings = [get_ring(p.exterior.coords, digits)]
         rings.extend(get_ring(hole.coords, digits) for hole in p.interiors)
-        polygons.append([r for r in rings if len(r) >= 3])
+        result.append([r for r in rings if len(r) >= 3])
 
-    return [p for p in polygons if p]
+    return [p for p in result if p]
+
+
+def find_parts():
+    """The map units in SEPARATE_PARTS, with geometries at the most detailed
+    resolution: also used to find them at the other resolutions."""
+    units = gpd.read_file("data/map-units/ne_10m_admin_0_map_units.shp")
+    return units[units["GU_A3"].isin(SEPARATE_PARTS)]
+
+
+def split_parts(country, parts):
+    """A country's polygons: {part code (or None for the rest): polygons}."""
+    geometry = country["geometry"]
+    polygons = [geometry] if isinstance(geometry, Polygon) else geometry.geoms
+    # a bit larger, as shapes differ between resolutions
+    areas = [
+        (part["GU_A3"], part["geometry"].buffer(0.2))
+        for _, part in parts[parts["ADM0_A3"] == country["ADM0_A3"]].iterrows()
+    ]
+    split = {}
+    for polygon in polygons:
+        point = polygon.representative_point()
+        code = next((code for code, area in areas if area.contains(point)), None)
+        split.setdefault(code, []).append(polygon)
+    return split
+
+
+def area(polygons):
+    """In km², in an equal-area projection."""
+    series = gpd.GeoSeries([MultiPolygon(polygons)], crs="EPSG:4326")
+    return series.to_crs("EPSG:6933").area.iloc[0] / 1e6
+
+
+def iso_a2(code):
+    # -99 for some disputed areas
+    return None if code == "-99" else code
 
 
 def main():
@@ -396,35 +494,56 @@ def main():
     nearby = find_nearby(data, neighbours)
     colors = assign_colors(neighbours, nearby)
     report_colors(neighbours, nearby, colors, dict(zip(data["ADM0_A3"], data["NAME"])))
-    capitals = find_capitals(data)
+    parts = find_parts()
+    capitals = find_capitals(data, parts)
+    # e.g. United Republic of Tanzania -> Tanzania
+    sovereign_names = dict(zip(data["ADMIN"], data["NAME_LONG"]))
 
     for resolution, digits in RESOLUTIONS.items():
         data = gpd.read_file(
             f"data/admin-countries/ne_{resolution}_admin_0_countries.shp"
         )
 
-        # in an equal-area projection
-        areas = data.geometry.to_crs("EPSG:6933").area / 1e6
-
         countries = []
-        for (_, country), area in zip(data.iterrows(), areas):
+        for _, country in data.iterrows():
             code = country["ADM0_A3"]
-            new_country = {
-                "name": country["NAME"],
-                "long_name": country["NAME_LONG"],
-                # -99 for some disputed areas
-                "iso_a2": None
-                if country["ISO_A2_EH"] == "-99"
-                else country["ISO_A2_EH"],
-                "capitals": capitals[code],
-                "population": int(country["POP_EST"]) or None,
-                "population_year": int(country["POP_YEAR"]),
-                "area": round(area),  # km²
+            common = {
+                # to show a country's parts together
+                "group": code,
                 "fill": colors[code],
-                "label_position": [country["LABEL_X"], country["LABEL_Y"]],
-                "polygons": get_polygons(country, digits),
             }
-            countries.append(new_country)
+            for part_code, polygons in split_parts(country, parts).items():
+                if part_code:
+                    part = parts[parts["GU_A3"] == part_code].iloc[0]
+                    info = {
+                        "name": part["NAME"],
+                        "long_name": part["NAME_LONG"],
+                        "part_of": sovereign_names.get(
+                            part["SOVEREIGNT"], part["SOVEREIGNT"]
+                        ),
+                        "iso_a2": iso_a2(part["ISO_A2_EH"]),
+                        "capitals": capitals[part_code],
+                        "population": int(part["POP_EST"]) or None,
+                        "population_year": int(part["POP_YEAR"]),
+                    }
+                else:
+                    info = {
+                        "name": country["NAME"],
+                        "long_name": country["NAME_LONG"],
+                        "part_of": None,
+                        "iso_a2": iso_a2(country["ISO_A2_EH"]),
+                        "capitals": capitals[code],
+                        "population": int(country["POP_EST"]) or None,
+                        "population_year": int(country["POP_YEAR"]),
+                    }
+                countries.append(
+                    {
+                        **info,
+                        **common,
+                        "area": round(area(polygons)),  # km²
+                        "polygons": get_polygons(polygons, digits),
+                    }
+                )
 
         with open(f"assets/countries-{resolution}.json", "w") as f:
             json.dump(countries, f, separators=(",", ":"))

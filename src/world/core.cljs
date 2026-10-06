@@ -118,6 +118,10 @@
           {:name (.-name c)
            :long-name (.-long_name c)
            :iso-a2 (.-iso_a2 c)
+           ;; e.g. "France" for French Guiana, which is shown separately
+           :part-of (.-part_of c)
+           ;; the country's code, the same for all its parts
+           :group (.-group c)
            :capitals (mapv (fn [^js capital]
                              {:name (.-name capital)
                               :note (.-note capital)
@@ -129,7 +133,6 @@
            :area (.-area c)
            ;; assigned in prepare-data.py, different from neighbours'
            :fill (.-fill c)
-           :label-position (vec (.-label_position c))
            :polygons (.-polygons c)
            :bounds (mapv clip/bounds (.-polygons c))})
         data))
@@ -451,18 +454,27 @@
        [:path {:d (second (nth paths i))
                :vectorEffect "non-scaling-stroke"}])]))
 
-(defn highlight-layer []
+(defn highlight-layer
+  "Outlines the hovered country, and less boldly the other parts of the same
+  country, e.g. France for French Guiana and vice versa."
+  []
   (let [countries @(rf/subscribe [::countries])
         paths @(rf/subscribe [::projected-paths])
         name @hovered
-        i (first (keep-indexed #(when (= name (:name %2)) %1) countries))]
-    (when i
-      [:path {:d (second (nth paths i))
-              :stroke "#111"
-              :strokeWidth 2
-              :fill "none"
-              :pointerEvents "none"
-              :vectorEffect "non-scaling-stroke"}])))
+        group (:group (first (filter #(= name (:name %)) countries)))]
+    (when group
+      [:g {:stroke "#111"
+           :fill "none"
+           :pointerEvents "none"}
+       ;; the hovered one last, on top
+       (for [[i country] (sort-by #(= name (:name (second %)))
+                                  (keep-indexed #(when (= group (:group %2))
+                                                   [%1 %2])
+                                                countries))]
+         ^{:key i}
+         [:path {:d (second (nth paths i))
+                 :strokeWidth (if (= name (:name country)) 2 1.25)
+                 :vectorEffect "non-scaling-stroke"}])])))
 
 (defn grid-step [step]
   (if (= step :auto)
@@ -771,7 +783,7 @@
     :else (.toLocaleString n "en")))
 
 (defn country-info []
-  (let [{:keys [long-name iso-a2 capitals population population-year]}
+  (let [{:keys [long-name part-of iso-a2 capitals population population-year]}
         (hovered-country)]
     (when long-name
       [:div {:style {:position "absolute"
@@ -790,9 +802,14 @@
                       :justifyContent "space-between"
                       :alignItems "flex-start"
                       :gap "12px"}}
-        [:div {:style {:fontSize "17px"
-                       :fontWeight "bold"}}
-         long-name]
+        [:div
+         [:div {:style {:fontSize "17px"
+                        :fontWeight "bold"}}
+          long-name]
+         (when part-of
+           [:div {:style {:color "#777"
+                          :marginTop "-2px"}}
+            "Part of " part-of])]
         (when iso-a2
           [:div {:style {:fontSize "28px"
                          :lineHeight "1"}}
