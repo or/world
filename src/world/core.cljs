@@ -621,6 +621,20 @@
      [grid-layer]
      [outlines-layer]]))
 
+;; Only once per page load, not on hot reloads.
+(defonce initial-view-set?
+  (atom false))
+
+(defn fit-width!
+  "Zoom so the map fills the width of the view, centered. The map is as wide
+  as the viewBox, which fills the height of the view when it's wider than
+  tall."
+  [[w h]]
+  (let [[cx cy] view-center
+        s (clamp (/ w h) min-zoom max-zoom)]
+    (reset! zoom s)
+    (reset! translate [(- cx (* s cx)) (- cy (* s cy))])))
+
 (defn world []
   (let [svg-ref (ra/atom nil)]
     (ra/create-class
@@ -633,8 +647,12 @@
                              #js {:passive false})
           (.observe (js/ResizeObserver.
                      (fn [entries]
-                       (let [rect (.-contentRect (aget entries 0))]
-                         (reset! svg-size [(.-width rect) (.-height rect)]))))
+                       (let [rect (.-contentRect (aget entries 0))
+                             size [(.-width rect) (.-height rect)]]
+                         (reset! svg-size size)
+                         (when-not @initial-view-set?
+                           (reset! initial-view-set? true)
+                           (fit-width! size)))))
                     svg)))
       :reagent-render
       (fn []
