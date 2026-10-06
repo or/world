@@ -1,7 +1,9 @@
 (ns world.core
   (:require
+   [cljs.reader :as reader]
    [clojure.string :as str]
    [re-frame.core :as rf]
+   [re-frame.db]
    [reagent.core :as ra]
    [reagent.dom.client :as r]
    [world.clip :as clip]
@@ -143,15 +145,19 @@
 
 (rf/reg-event-fx
   ::initialize
-  (fn [{:keys [db]} _]
+  ;; The settings saved last time, see ::saved-settings
+  [(rf/inject-cofx ::saved-settings)]
+  (fn [{:keys [db saved-settings]} _]
     (if (:resolution db)
       {:db db}
-      {:db (assoc db
-                  :projection :equal-earth
-                  :central-meridian 0
-                  :datasets {}
-                  :loading #{})
-       :dispatch [::set-resolution :50m]})))
+      {:db (merge (assoc db
+                         :projection :equal-earth
+                         :central-meridian 0
+                         :datasets {}
+                         :loading #{})
+                  (select-keys saved-settings
+                               [:projection :south-up? :central-meridian :grid]))
+       :dispatch [::set-resolution (:resolution saved-settings :50m)]})))
 
 (rf/reg-event-fx
   ::set-resolution
@@ -890,6 +896,91 @@
       [:p "Loading..."]
       [world])))
 
+;; Settings and the view are saved in the browser's local storage, and restored
+;; when the page is loaded.
+
+(def storage-key
+  "world/settings")
+
+(defn valid-settings
+  "The parts of saved settings that are still valid: they may be from an older
+  version, or edited."
+  [{:keys [projection resolution south-up? central-meridian grid zoom translate]}]
+  (let [finite? #(and (number? %) (js/isFinite %))]
+    (cond-> {}
+      (contains? proj/projections projection)
+      (assoc :projection projection)
+
+      (some #{resolution} (map first resolutions))
+      (assoc :resolution resolution)
+
+      (boolean? south-up?)
+      (assoc :south-up? south-up?)
+
+      (and (finite? central-meridian) (<= -180 central-meridian 180))
+      (assoc :central-meridian central-meridian)
+
+      (map? grid)
+      (assoc :grid (select-keys grid (keys default-grid-settings)))
+
+      (and (finite? zoom) (<= min-zoom zoom max-zoom))
+      (assoc :zoom zoom)
+
+      (and (vector? translate) (= 2 (count translate)) (every? finite? translate))
+      (assoc :translate translate))))
+
+(defn load-settings []
+  (try
+    (some-> (.getItem js/localStorage storage-key)
+            reader/read-string
+            valid-settings)
+    ;; storage may be unavailable, or the saved settings unreadable
+    (catch :default _
+      nil)))
+
+(rf/reg-cofx
+  ::saved-settings
+  (fn [cofx _]
+    (assoc cofx :saved-settings (load-settings))))
+
+(defn save-settings! []
+  (let [db @re-frame.db/app-db]
+    (try
+      (.setItem js/localStorage
+                storage-key
+                (pr-str (assoc (select-keys db [:projection
+                                                :resolution
+                                                :south-up?
+                                                :central-meridian
+                                                :grid])
+                               :zoom @zoom
+                               :translate @translate)))
+      (catch :default _
+        nil))))
+
+(defonce save-timeout
+  (atom nil))
+
+(defn schedule-save!
+  "Saves the settings soon: not on every step while dragging."
+  [& _]
+  (js/clearTimeout @save-timeout)
+  (reset! save-timeout (js/setTimeout save-settings! 300)))
+
+(defn restore-view!
+  "Restores the saved zoom and position, instead of fitting the map to the
+  view, on page load."
+  []
+  (when-not @initial-view-set?
+    (let [saved (load-settings)]
+      (when (and (:zoom saved) (:translate saved))
+        (reset! zoom (:zoom saved))
+        (reset! translate (:translate saved))
+        (reset! initial-view-set? true)))))
+
 (defn ^:export init []
   (rf/dispatch-sync [::initialize])
+  (restore-view!)
+  (doseq [state [re-frame.db/app-db zoom translate]]
+    (add-watch state ::save schedule-save!))
   (r/render (app-root) [app]))
