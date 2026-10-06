@@ -96,6 +96,19 @@
     (and (< (js/Math.abs lat) 90)
          (<= (js/Math.abs (- x x0)) (js/Math.abs (- x180 x0))))))
 
+(defn prime-meridians
+  "Where the prime meridian is on a map centered on `center`: once, or on
+  both edges when the center is ±180°."
+  [center]
+  (longitudes 360 center))
+
+(defn prime-meridian-path [projection center]
+  (let [[proj-fn height] (proj/get-projection projection)
+        max-lat (proj/max-lat projection)]
+    (apply str
+           (for [lon (prime-meridians center)]
+             (line->path (meridian proj-fn height max-lat (- lon center)))))))
+
 (defn labels
   "Grid labels in screen (viewBox) coordinates. Longitudes go along the
   equator, latitudes along the central meridian. Either is moved to the edge
@@ -103,7 +116,8 @@
 
   to-screen and from-screen convert between map and screen coordinates;
   visible is the visible area in screen coordinates: [left top right bottom]."
-  [{:keys [projection center step grid? equator? to-screen from-screen visible]}]
+  [{:keys [projection center step grid? equator? prime-meridian? to-screen
+           from-screen visible]}]
   (let [[proj-fn height] (proj/get-projection projection)
         max-lat (proj/max-lat projection)
         [left top right bottom] visible
@@ -117,15 +131,19 @@
                      (+ left padding)
                      (- right padding (* 3.5 font-size)))]
     (concat
-     (when (and grid? (< (js/Math.abs lon-lat) max-lat))
-       (for [lon (longitudes step center)
+     (when (< (js/Math.abs lon-lat) max-lat)
+       (for [lon (cond
+                   grid? (longitudes step center)
+                   prime-meridian? (prime-meridians center))
              :let [[x] (to-screen (proj-fn (- lon center) lon-lat 1000 height))]
              ;; roughly half a label's width from the edges
              :when (<= (+ left (* 2 font-size)) x (- right (* 2 font-size)))]
          {:key (str "lon" lon)
           :x x
           :y lon-y
-          :text (format-longitude lon)
+          :text (if (and prime-meridian? (zero? (normalize-lon lon)))
+                  "Prime meridian"
+                  (format-longitude lon))
           :anchor "middle"
           :baseline "hanging"}))
      (for [lat (cond-> (if grid? (latitudes step max-lat) [])

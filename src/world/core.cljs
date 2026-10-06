@@ -231,6 +231,7 @@
   {:grid? true
    :step :auto
    :equator? true
+   :prime-meridian? true
    :labels? true})
 
 (rf/reg-sub ::grid-settings
@@ -438,8 +439,21 @@
   (fn [projection _]
     (grid/equator-path projection)))
 
+(rf/reg-sub
+  ::prime-meridian-path
+  :<- [::projection]
+  :<- [::central-meridian]
+  (fn [[projection center] _]
+    (grid/prime-meridian-path projection center)))
+
+(def thick-line
+  {:stroke "rgba(255, 255, 255, 0.9)"
+   :strokeWidth 1.5
+   :vectorEffect "non-scaling-stroke"})
+
 (defn grid-layer []
-  (let [{:keys [grid? step equator?]} @(rf/subscribe [::grid-settings])]
+  (let [{:keys [grid? step equator? prime-meridian?]}
+        @(rf/subscribe [::grid-settings])]
     [:g {:fill "none"
          :vectorEffect "non-scaling-stroke"}
      (when grid?
@@ -448,10 +462,9 @@
                :strokeWidth 0.5
                :vectorEffect "non-scaling-stroke"}])
      (when equator?
-       [:path {:d @(rf/subscribe [::equator-path])
-               :stroke "rgba(255, 255, 255, 0.9)"
-               :strokeWidth 1.5
-               :vectorEffect "non-scaling-stroke"}])]))
+       [:path (assoc thick-line :d @(rf/subscribe [::equator-path]))])
+     (when prime-meridian?
+       [:path (assoc thick-line :d @(rf/subscribe [::prime-meridian-path]))])]))
 
 (defn visible-area
   "The part of the viewBox that's visible: [left top right bottom]. The SVG
@@ -465,13 +478,14 @@
     [(- cx half-w) (- cy half-h) (+ cx half-w) (+ cy half-h)]))
 
 (defn grid-labels-layer []
-  (let [{:keys [grid? step equator? labels?]} @(rf/subscribe [::grid-settings])
+  (let [{:keys [grid? step equator? prime-meridian? labels?]}
+        @(rf/subscribe [::grid-settings])
         projection @(rf/subscribe [::projection])
         center @(rf/subscribe [::central-meridian])
         south-up? @(rf/subscribe [::south-up?])
         s @zoom
         [tx ty] @translate]
-    (when (and labels? (or grid? equator?))
+    (when (and labels? (or grid? equator? prime-meridian?))
       [:g {:fontSize grid/font-size
            :fill "#222"
            :stroke "rgba(255, 255, 255, 0.8)"
@@ -487,6 +501,7 @@
                :step (grid-step step)
                :grid? grid?
                :equator? equator?
+               :prime-meridian? prime-meridian?
                :to-screen (fn [p]
                             (let [[x y] (rotate-south-up south-up? p)]
                               [(+ tx (* s x)) (+ ty (* s y))]))
@@ -510,7 +525,8 @@
    " " label])
 
 (defn grid-settings []
-  (let [{:keys [grid? step equator? labels?]} @(rf/subscribe [::grid-settings])
+  (let [{:keys [grid? step equator? prime-meridian? labels?]}
+        @(rf/subscribe [::grid-settings])
         set-setting #(rf/dispatch [::set-grid-setting %1 %2])]
     [:<>
      [:div {:style {:marginTop "16px"
@@ -534,6 +550,7 @@
          ^{:key step}
          [:option {:value (str step)} (str step "°")])]]
      [checkbox "Equator" equator? #(set-setting :equator? %)]
+     [checkbox "Prime meridian" prime-meridian? #(set-setting :prime-meridian? %)]
      [checkbox "Labels" labels? #(set-setting :labels? %)]]))
 
 (defn sidebar []
