@@ -3,7 +3,8 @@
    [clojure.string :as str]
    [re-frame.core :as rf]
    [reagent.core :as ra]
-   [reagent.dom.client :as r]))
+   [reagent.dom.client :as r]
+   [world.clip :as clip]))
 
 (defonce zoom
   (ra/atom 1.0))
@@ -124,7 +125,8 @@
           {:name (.-name c)
            :fill (country-fill (.-name c))
            :label-position (vec (.-label_position c))
-           :polygons (.-polygons c)})
+           :polygons (.-polygons c)
+           :bounds (mapv clip/bounds (.-polygons c))})
         data))
 
 (rf/reg-event-db
@@ -143,6 +145,7 @@
       {:db db}
       {:db (assoc db
                   :projection :equal-earth
+                  :central-meridian 0
                   :datasets {}
                   :loading #{})
        :dispatch [::set-resolution :50m]})))
@@ -185,21 +188,38 @@
            (fn [err]
              (js/console.error "Failed to fetch countries:" err)))))))
 
+(def preview-resolution
+  :110m)
+
 (rf/reg-sub ::shown-resolution
+  ;; Dragging the meridian slider re-projects everything on every step, which
+  ;; is too slow for smooth dragging with detailed boundaries.
+  (fn [{:keys [shown-resolution dragging-meridian? datasets]} _]
+    (if (and dragging-meridian? (get datasets preview-resolution))
+      preview-resolution
+      shown-resolution)))
+
+(rf/reg-sub ::datasets
   (fn [db _]
-    (:shown-resolution db)))
+    (:datasets db)))
 
 (rf/reg-sub ::resolution
   (fn [db _]
     (:resolution db)))
 
 (rf/reg-sub ::countries
-  (fn [db _]
-    (get-in db [:datasets (:shown-resolution db)])))
+  :<- [::shown-resolution]
+  :<- [::datasets]
+  (fn [[resolution datasets] _]
+    (get datasets resolution)))
 
 (rf/reg-sub ::projection
   (fn [db _]
     (:projection db)))
+
+(rf/reg-sub ::central-meridian
+  (fn [db _]
+    (:central-meridian db 0)))
 
 (rf/reg-sub ::south-up?
   (fn [db _]
@@ -394,19 +414,29 @@
     [(+ (/ width 2) (* (/ width 2 equal-earth-max-x) x))
      (- (* (/ height 2 equal-earth-max-y) y))]))
 
-(defn country->path
-  "One SVG path for all of a country's polygons, holes included (drawn with
-  fill-rule evenodd)."
-  [proj-fn country width height]
-  (let [out #js []]
-    (doseq [^js polygon (:polygons country)
-            ^js ring polygon]
-      (dotimes [i (alength ring)]
-        (let [^js point (aget ring i)
-              [x y] (proj-fn (aget point 0) (aget point 1) width height)]
-          (.push out (if (zero? i) "M" "L") (round2 x) "," (round2 y))))
-      (.push out "Z"))
-    (.join out "")))
+(defn push-path! [^js out proj-fn ^js points offset width height close?]
+  (dotimes [i (alength points)]
+    (let [^js point (aget points i)
+          [x y] (proj-fn (+ (aget point 0) offset) (aget point 1) width height)]
+      (.push out (if (zero? i) "M" "L") (round2 x) "," (round2 y))))
+  (when close?
+    (.push out "Z")))
+
+(defn country->paths
+  "SVG paths [fill outline] for a country on a map centered on longitude
+  `center`. The fill has all polygons, holes included (fill-rule evenodd)."
+  [proj-fn country center width height]
+  (let [fill #js []
+        outline #js []]
+    (doseq [[polygon bounds] (map vector (:polygons country) (:bounds country))
+            strip (clip/strips bounds center)
+            :let [[offset] strip]]
+      (doseq [ring (clip/fill-rings polygon strip)]
+        (push-path! fill proj-fn ring offset width height true))
+      (doseq [ring polygon
+              line (clip/outline-lines ring strip)]
+        (push-path! outline proj-fn line offset width height false)))
+    [(.join fill "") (.join outline "")]))
 
 (def projections
   {:mercator [mercator-projection 1000]
@@ -486,6 +516,33 @@
       {:db new-db
        ::keep-center [(view-settings db) (view-settings new-db)]})))
 
+(rf/reg-fx
+  ::center-meridian
+  ;; Pan horizontally so the central meridian is on the center line of the
+  ;; view. It's the vertical line through the middle of the map, also when
+  ;; rotated.
+  (fn [_]
+    (let [[cx] view-center
+          [_ ty] @translate]
+      (reset! translate [(- cx (* @zoom cx)) ty]))))
+
+(rf/reg-event-fx
+  ::set-central-meridian
+  (fn [{:keys [db]} [_ central-meridian]]
+    {:db (assoc db :central-meridian central-meridian)
+     ::center-meridian nil}))
+
+(rf/reg-event-fx
+  ::set-dragging-meridian
+  (fn [{:keys [db]} [_ dragging?]]
+    (let [db (assoc db :dragging-meridian? dragging?)]
+      (if (and dragging?
+               (not (get-in db [:datasets preview-resolution]))
+               (not (contains? (:loading db) preview-resolution)))
+        {:db (update db :loading conj preview-resolution)
+         :fetch-countries preview-resolution}
+        {:db db}))))
+
 (rf/reg-event-fx
   ::set-south-up
   (fn [{:keys [db]} [_ south-up?]]
@@ -493,44 +550,76 @@
       {:db new-db
        ::keep-center [(view-settings db) (view-settings new-db)]})))
 
-;; [resolution projection] -> vector of path strings. Projecting the 10m data
-;; takes a moment, so switching back to a projection seen before is instant.
+;; [resolution projection central-meridian] -> vector of [fill outline]
+;; paths. Projecting the 10m data takes a moment, so switching back to a view
+;; seen before is instant. Only the most recent ones are kept, as dragging the
+;; meridian slider creates lots.
 ;; Plain def (not defonce), so it's cleared when this file is hot-reloaded.
 (def path-cache
-  (atom {}))
+  (atom {:keys []
+         :paths {}}))
+
+(def path-cache-size
+  12)
+
+(defn cache-paths! [k paths]
+  (swap! path-cache
+         (fn [{:keys [keys] :as cache}]
+           (let [evicted (drop path-cache-size (cons k (reverse keys)))]
+             {:keys (conj (vec (remove (set evicted) keys)) k)
+              :paths (-> (apply dissoc (:paths cache) evicted)
+                         (assoc k paths))})))
+  paths)
 
 (rf/reg-sub
   ::projected-paths
   :<- [::shown-resolution]
   :<- [::countries]
   :<- [::projection]
-  (fn [[resolution countries projection] _]
-    (let [k [resolution projection]]
-      (or (get @path-cache k)
-          (let [[proj-fn height] (get-projection projection)
-                paths (mapv #(country->path proj-fn % 1000 height)
-                            countries)]
-            (swap! path-cache assoc k paths)
-            paths)))))
+  :<- [::central-meridian]
+  (fn [[resolution countries projection central-meridian] _]
+    (let [k [resolution projection central-meridian]]
+      (or (get-in @path-cache [:paths k])
+          (let [[proj-fn height] (get-projection projection)]
+            (cache-paths! k (mapv #(country->paths proj-fn
+                                                   %
+                                                   central-meridian
+                                                   1000
+                                                   height)
+                                  countries)))))))
 
 (defn countries-layer []
   (let [countries @(rf/subscribe [::countries])
         paths @(rf/subscribe [::projected-paths])]
+    ;; All outlines on top of all fills, so no fill covers a neighbour's
+    ;; border.
     [:<>
-     (for [[i {:keys [fill]}] (map-indexed vector countries)]
-       ^{:key i}
-       [:path {:d (nth paths i)
-               :stroke "#333"
-               :strokeWidth 0.5
-               :fill fill
-               :fillRule "evenodd"
-               :vectorEffect "non-scaling-stroke"}])]))
+     [:g
+      (for [[i {:keys [fill]}] (map-indexed vector countries)]
+        ^{:key i}
+        [:path {:d (first (nth paths i))
+                :fill fill
+                :fillRule "evenodd"}])]
+     [:g {:stroke "#333"
+          :strokeWidth 0.5
+          :fill "none"}
+      (for [i (range (count countries))]
+        ^{:key i}
+        [:path {:d (second (nth paths i))
+                :vectorEffect "non-scaling-stroke"}])]]))
+
+(defn format-longitude [lon]
+  (cond
+    (or (zero? lon) (== 180 (js/Math.abs lon))) (str (js/Math.abs lon) "°")
+    (pos? lon) (str lon "°E")
+    :else (str (- lon) "°W")))
 
 (defn sidebar []
   (let [projection @(rf/subscribe [::projection])
         resolution @(rf/subscribe [::resolution])
         fetching? @(rf/subscribe [::fetching?])
-        south-up? @(rf/subscribe [::south-up?])]
+        south-up? @(rf/subscribe [::south-up?])
+        central-meridian @(rf/subscribe [::central-meridian])]
     [:div {:style {:display "flex"
                    :flexDirection "column"
                    :width "220px"
@@ -563,6 +652,29 @@
                             [::set-south-up
                              (.. % -target -checked)])}]
       " South up"]
+     [:label {:for "meridian-slider"
+              :style {:marginTop "16px"
+                      :marginBottom "8px"
+                      :fontWeight "bold"}}
+      "Central meridian: " (format-longitude central-meridian)]
+     [:input {:id "meridian-slider"
+              :type "range"
+              :min -180
+              :max 180
+              :step 1
+              :value central-meridian
+              :on-pointer-down (fn [_]
+                                 (rf/dispatch [::set-dragging-meridian true])
+                                 ;; on window, as the pointer may be released
+                                 ;; outside the slider
+                                 (.addEventListener
+                                  js/window
+                                  "pointerup"
+                                  #(rf/dispatch [::set-dragging-meridian false])
+                                  #js {:once true}))
+              :on-change #(rf/dispatch
+                           [::set-central-meridian
+                            (js/parseInt (.. % -target -value))])}]
      [:label {:for "resolution-select"
               :style {:marginTop "16px"
                       :marginBottom "8px"
