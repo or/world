@@ -75,10 +75,11 @@
 (defn on-mouse-down [e]
   (.preventDefault e)
   (.stopPropagation e)
+  ;; In viewBox coordinates, like translate: the SVG scales them to the
+  ;; screen.
   (reset! drag
           {:active? true
-           :start [(.-clientX e)
-                   (.-clientY e)]
+           :start (svg-coords (.-currentTarget e) e)
            :base @translate}))
 
 (defn on-mouse-move [e]
@@ -88,8 +89,9 @@
     (let [{:keys [start base]} @drag
           [sx sy] start
           [bx by] base
-          dx (- (.-clientX e) sx)
-          dy (- (.-clientY e) sy)]
+          [x y] (svg-coords (.-currentTarget e) e)
+          dx (- x sx)
+          dy (- y sy)]
       (reset! translate
               [(+ bx dx)
                (+ by dy)]))))
@@ -512,27 +514,35 @@
         half-h (/ h k 2)]
     [(- cx half-w) (- cy half-h) (+ cx half-w) (+ cy half-h)]))
 
+(defn current-view
+  "What's needed to convert between map and screen (viewBox) coordinates.
+  Deref'd here, while rendering, so components using it re-render when the
+  view changes: in to-screen and from-screen, that may be too late, e.g. in
+  lazy sequences."
+  [south-up?]
+  {:south-up? south-up?
+   :zoom @zoom
+   :translate @translate})
+
 (defn to-screen
-  "Map coordinates -> screen (viewBox) coordinates, for the current view."
-  [south-up? p]
+  "Map coordinates -> screen (viewBox) coordinates."
+  [{:keys [south-up? zoom translate]} p]
   (let [[x y] (rotate-south-up south-up? p)
-        s @zoom
-        [tx ty] @translate]
-    [(+ tx (* s x)) (+ ty (* s y))]))
+        [tx ty] translate]
+    [(+ tx (* zoom x)) (+ ty (* zoom y))]))
 
 (defn from-screen
-  "Screen (viewBox) coordinates -> map coordinates, for the current view."
-  [south-up? [x y]]
-  (let [s @zoom
-        [tx ty] @translate]
-    (rotate-south-up south-up? [(/ (- x tx) s) (/ (- y ty) s)])))
+  "Screen (viewBox) coordinates -> map coordinates."
+  [{:keys [south-up? zoom translate]} [x y]]
+  (let [[tx ty] translate]
+    (rotate-south-up south-up? [(/ (- x tx) zoom) (/ (- y ty) zoom)])))
 
 (defn grid-labels-layer []
   (let [{:keys [grid? step equator? prime-meridian? labels?]}
         @(rf/subscribe [::grid-settings])
         projection @(rf/subscribe [::projection])
         center @(rf/subscribe [::central-meridian])
-        south-up? @(rf/subscribe [::south-up?])]
+        view (current-view @(rf/subscribe [::south-up?]))]
     (when (and labels? (or grid? equator? prime-meridian?))
       [:g {:fontSize grid/font-size
            :fill "#222"
@@ -550,8 +560,8 @@
                :grid? grid?
                :equator? equator?
                :prime-meridian? prime-meridian?
-               :to-screen (partial to-screen south-up?)
-               :from-screen (partial from-screen south-up?)
+               :to-screen (partial to-screen view)
+               :from-screen (partial from-screen view)
                :visible (visible-area)})]
          ^{:key key}
          [:text {:x x
@@ -565,19 +575,31 @@
         name @hovered]
     (first (filter #(= name (:name %)) countries))))
 
-(defn capital-marker [x y]
+(defn capital-marker [x y name]
   ;; a cross in a circle, dark with a white halo to stand out on any colour
   (let [shape [:<>
                [:circle {:r 7}]
                [:path {:d "M-12,0H12M0,-12V12"}]]]
-    [:g {:transform (str "translate(" x " " y ")")
-         :fill "none"}
-     [:g {:stroke "white"
+    [:g {:transform (str "translate(" x " " y ")")}
+     [:g {:fill "none"
+          :stroke "white"
           :strokeWidth 4.5}
       shape]
-     [:g {:stroke "#111"
+     [:g {:fill "none"
+          :stroke "#111"
           :strokeWidth 1.75}
-      shape]]))
+      shape]
+     [:text {:x 15
+             :y 0
+             :dominantBaseline "middle"
+             :fontSize 13
+             :fontWeight "bold"
+             :fill "#111"
+             :stroke "white"
+             :strokeWidth 3.5
+             :strokeLinejoin "round"
+             :paintOrder "stroke"}
+      name]]))
 
 (defn capitals-layer
   "Markers for the hovered country's capitals. In screen coordinates, so
@@ -586,17 +608,18 @@
   (let [{:keys [capitals]} (hovered-country)
         projection @(rf/subscribe [::projection])
         center @(rf/subscribe [::central-meridian])
-        south-up? @(rf/subscribe [::south-up?])
+        view (current-view @(rf/subscribe [::south-up?]))
         [proj-fn height] (proj/get-projection projection)]
-    [:g {:pointerEvents "none"}
+    [:g {:pointerEvents "none"
+         :style {:userSelect "none"}}
      (for [{:keys [name lat lon]} capitals
-           :let [[x y] (to-screen south-up?
+           :let [[x y] (to-screen view
                                   (proj-fn (grid/normalize-lon (- lon center))
                                            lat
                                            1000
                                            height))]]
        ^{:key name}
-       [capital-marker x y])]))
+       [capital-marker x y name])]))
 
 (defn checkbox [label checked? on-change]
   [:label {:style {:marginTop "8px"}}
