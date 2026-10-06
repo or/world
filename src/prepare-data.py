@@ -349,8 +349,11 @@ def main():
             f"data/admin-countries/ne_{resolution}_admin_0_countries.shp"
         )
 
+        # in an equal-area projection
+        areas = data.geometry.to_crs("EPSG:6933").area / 1e6
+
         countries = []
-        for _, country in data.iterrows():
+        for (_, country), area in zip(data.iterrows(), areas):
             code = country["ADM0_A3"]
             new_country = {
                 "name": country["NAME"],
@@ -362,6 +365,7 @@ def main():
                 "capital": capitals.get(code),
                 "population": int(country["POP_EST"]) or None,
                 "population_year": int(country["POP_YEAR"]),
+                "area": round(area),  # km²
                 "fill": colors[code],
                 "label_position": [country["LABEL_X"], country["LABEL_Y"]],
                 "polygons": get_polygons(country, digits),

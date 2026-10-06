@@ -117,6 +117,7 @@
            :capital (.-capital c)
            :population (.-population c)
            :population-year (.-population_year c)
+           :area (.-area c)
            ;; assigned in prepare-data.py, different from neighbours'
            :fill (.-fill c)
            :label-position (vec (.-label_position c))
@@ -387,11 +388,35 @@
                                                    height)
                                   countries)))))))
 
+(def halo-width
+  ;; pixels
+  12)
+
+(defn halos-layer
+  "Invisible margins around countries that also count as hovering them, to
+  make small islands easier to hover. Below the fills, so the country under
+  the mouse wins. Smaller countries on top, so their margins win."
+  []
+  (let [countries @(rf/subscribe [::countries])
+        paths @(rf/subscribe [::projected-paths])]
+    [:g {:fill "none"
+         :stroke "black"
+         :strokeWidth halo-width
+         :strokeLinejoin "round"
+         ;; not drawn, but still hit by the mouse
+         :visibility "hidden"
+         :pointerEvents "stroke"}
+     (for [[i {:keys [name]}] (sort-by (comp - :area second)
+                                       (map-indexed vector countries))]
+       ^{:key i}
+       [:path {:d (first (nth paths i))
+               :data-name name
+               :vectorEffect "non-scaling-stroke"}])]))
+
 (defn fills-layer []
   (let [countries @(rf/subscribe [::countries])
         paths @(rf/subscribe [::projected-paths])]
-    [:g {:on-mouse-over #(reset! hovered (.. % -target -dataset -name))
-         :on-mouse-leave #(reset! hovered nil)}
+    [:g
      (for [[i {:keys [name fill]}] (map-indexed vector countries)]
        ^{:key i}
        [:path {:d (first (nth paths i))
@@ -643,7 +668,10 @@
         [cx cy] view-center]
     [:g {:transform (when south-up?
                       (str "rotate(180 " cx " " cy ")"))}
-     [fills-layer]
+     [:g {:on-mouse-over #(reset! hovered (.. % -target -dataset -name))
+          :on-mouse-leave #(reset! hovered nil)}
+      [halos-layer]
+      [fills-layer]]
      [grid-layer]
      [outlines-layer]
      [highlight-layer]]))
