@@ -1,6 +1,9 @@
 * World
 ** Country data
 - https://www.naturalearthdata.com/
-- Admin 0 countries at 1:10m, 1:50m and 1:110m, unzipped into =data/admin-countries/=
-  - e.g. https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip
-- =uv run src/prepare-data.py= writes =assets/countries-{10m,50m,110m}.json=
+- The app only loads the generated =assets/countries-{10m,50m,110m}.json=, no
+  external sites.
+- To update them:
+  - =uv run src/download-data.py= downloads Natural Earth's countries, map
+    units and populated places into =data/=
+  - =uv run src/prepare-data.py= writes =assets/countries-{10m,50m,110m}.json=
