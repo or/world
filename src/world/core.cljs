@@ -355,6 +355,41 @@
 (defn round2 [x]
   (/ (js/Math.round (* x 100)) 100))
 
+;; Šavrič, Patterson & Jenny (2018): "The Equal Earth map projection"
+(def equal-earth-a1 1.340264)
+(def equal-earth-a2 -0.081106)
+(def equal-earth-a3 0.000893)
+(def equal-earth-a4 0.003796)
+(def equal-earth-m (/ (js/Math.sqrt 3) 2))
+
+(defn equal-earth-unscaled [lambda phi]
+  (let [theta (js/Math.asin (* equal-earth-m (js/Math.sin phi)))
+        t2 (* theta theta)
+        t6 (* t2 t2 t2)
+        x (/ (* 2 (js/Math.sqrt 3) lambda (js/Math.cos theta))
+             (* 3 (+ equal-earth-a1
+                     (* 3 equal-earth-a2 t2)
+                     (* t6 (+ (* 7 equal-earth-a3)
+                              (* 9 equal-earth-a4 t2))))))
+        y (* theta
+             (+ equal-earth-a1
+                (* equal-earth-a2 t2)
+                (* t6 (+ equal-earth-a3
+                         (* equal-earth-a4 t2)))))]
+    [x y]))
+
+;; Extent of the unscaled map: x at (180°, 0°), y at the pole
+(def equal-earth-max-x
+  (first (equal-earth-unscaled Math/PI 0)))
+
+(def equal-earth-max-y
+  (second (equal-earth-unscaled 0 (/ Math/PI 2))))
+
+(defn equal-earth-projection [lon lat width height]
+  (let [[x y] (equal-earth-unscaled (deg->rad lon) (deg->rad lat))]
+    [(+ (/ width 2) (* (/ width 2 equal-earth-max-x) x))
+     (- (* (/ height 2 equal-earth-max-y) y))]))
+
 (defn country->path
   "One SVG path for all of a country's polygons, holes included (drawn with
   fill-rule evenodd)."
@@ -376,7 +411,9 @@
    :gall-peters [gall-peters-projection 650]
    :robinson [robinson-projection 500]
    :mollweide [mollweide-projection 500]
-   :eckert4 [eckert4-projection 500]})
+   :eckert4 [eckert4-projection 500]
+   ;; equal-earth-max-x / equal-earth-max-y ≈ 2.05
+   :equal-earth [equal-earth-projection 487]})
 
 (defn get-projection [projection]
   (get projections projection (:mercator projections)))
@@ -489,7 +526,8 @@
       [:option {:value "gall-peters"} "Gall–Peters"]
       [:option {:value "robinson"} "Robinson"]
       [:option {:value "mollweide"} "Mollweide"]
-      [:option {:value "eckert4"} "Eckert IV"]]
+      [:option {:value "eckert4"} "Eckert IV"]
+      [:option {:value "equal-earth"} "Equal Earth"]]
      [:label {:for "resolution-select"
               :style {:marginTop "16px"
                       :marginBottom "8px"
