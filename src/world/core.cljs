@@ -107,24 +107,45 @@
    "#d3b7a3"
    "#c6aba3"])
 
+(def resolutions
+  ;; Natural Earth scales, see src/prepare-data.py
+  [[:110m "Low (1:110m)"]
+   [:50m "Medium (1:50m)"]
+   [:10m "High (1:10m)"]])
+
+(defn country-fill [name]
+  ;; Stable per country, so it doesn't change when switching resolutions.
+  (nth country-colors (mod (hash name) (count country-colors))))
+
+(defn parse-countries [data]
+  ;; Coordinates stay plain JS arrays: converting hundreds of thousands of
+  ;; points with js->clj is slow, and nothing needs them as persistent data.
+  (mapv (fn [^js c]
+          {:name (.-name c)
+           :fill (country-fill (.-name c))
+           :label-position (vec (.-label_position c))
+           :polygons (.-polygons c)})
+        data))
+
 (rf/reg-event-db
   ::set-countries
-  (fn [db [_ countries]]
-    (let [colored (mapv #(assoc % :fill (rand-nth country-colors))
-                        countries)]
-      (assoc db
-             :loading? false
-             :countries colored))))
+  (fn [db [_ resolution countries]]
+    (cond-> (-> db
+                (assoc-in [:datasets resolution] countries)
+                (update :loading disj resolution))
+      (= resolution (:resolution db))
+      (assoc :shown-resolution resolution))))
 
 (rf/reg-event-fx
   ::initialize
   (fn [{:keys [db]} _]
-    (if (:countries db)
+    (if (:resolution db)
       {:db db}
       {:db (assoc db
-                  :loading? true
-                  :projection :mercator)
-       :dispatch [::load-countries]})))
+                  :projection :mercator
+                  :datasets {}
+                  :loading #{})
+       :dispatch [::set-resolution :50m]})))
 
 (rf/reg-event-db
   ::set-projection
@@ -132,36 +153,54 @@
     (assoc db :projection projection)))
 
 (rf/reg-event-fx
-  ::load-countries
-  (fn [_ _]
-    {:fetch-countries "/countries.json"}))
+  ::set-resolution
+  (fn [{:keys [db]} [_ resolution]]
+    (let [db (assoc db :resolution resolution)]
+      (cond
+        (get-in db [:datasets resolution])
+        {:db (assoc db :shown-resolution resolution)}
+
+        (contains? (:loading db) resolution)
+        {:db db}
+
+        :else
+        {:db (update db :loading conj resolution)
+         :fetch-countries resolution}))))
 
 (rf/reg-fx
   :fetch-countries
-  (fn [url]
-    (-> (js/fetch url)
-        (.then
-         (fn [resp]
-           (if (.-ok resp)
-             (.json resp)
-             (throw (js/Error.
-                     (str "Failed to load "
-                          url
-                          " ("
-                          (.-status resp)
-                          ")"))))))
-        (.then
-         (fn [data]
-           (rf/dispatch
-            [::set-countries
-             (js->clj data :keywordize-keys true)])))
-        (.catch
-         (fn [err]
-           (js/console.error "Failed to fetch countries:" err))))))
+  (fn [resolution]
+    (let [url (str "/countries-" (name resolution) ".json")]
+      (-> (js/fetch url)
+          (.then
+           (fn [resp]
+             (if (.-ok resp)
+               (.json resp)
+               (throw (js/Error.
+                       (str "Failed to load "
+                            url
+                            " ("
+                            (.-status resp)
+                            ")"))))))
+          (.then
+           (fn [data]
+             (rf/dispatch
+              [::set-countries resolution (parse-countries data)])))
+          (.catch
+           (fn [err]
+             (js/console.error "Failed to fetch countries:" err)))))))
+
+(rf/reg-sub ::shown-resolution
+  (fn [db _]
+    (:shown-resolution db)))
+
+(rf/reg-sub ::resolution
+  (fn [db _]
+    (:resolution db)))
 
 (rf/reg-sub ::countries
   (fn [db _]
-    (:countries db)))
+    (get-in db [:datasets (:shown-resolution db)])))
 
 (rf/reg-sub ::projection
   (fn [db _]
@@ -169,7 +208,11 @@
 
 (rf/reg-sub ::loading?
   (fn [db _]
-    (:loading? db)))
+    (nil? (:shown-resolution db))))
+
+(rf/reg-sub ::fetching?
+  (fn [db _]
+    (boolean (seq (:loading db)))))
 
 (defn deg->rad [d]
   (* d (/ Math/PI 180)))
@@ -242,15 +285,12 @@
 (defn lerp [a b t] (+ a (* (- b a) t)))
 
 (defn robinson-projection [lon lat width height]
-  (let [abs-lat (js/Math.abs lat)
-        entries robinson-data
-        upper-idx (last (take-while #(> abs-lat (first %))
-                                    entries))
-        lower-idx (nth entries (min (+ (.indexOf entries upper-idx) 1)
-                                    (dec (count entries))))
-        [phi1 x1 y1] upper-idx
-        [phi2 x2 y2] lower-idx
-        t (/ (- abs-lat phi1) (- phi2 phi1))
+  (let [abs-lat (min (js/Math.abs lat) 90)
+        i (min (js/Math.floor (/ abs-lat 5))
+               (- (count robinson-data) 2))
+        [phi1 x1 y1] (nth robinson-data i)
+        [_ x2 y2] (nth robinson-data (inc i))
+        t (/ (- abs-lat phi1) 5)
         xcoef (lerp x1 x2 t)
         ycoef (lerp y1 y2 t)
         delta (deg->rad lon)
@@ -263,15 +303,18 @@
   (let [lambda (deg->rad lon)
         phi (deg->rad lat)
         epsilon 1e-10
-        theta (loop [t phi
-                     i 0]
-                (let [f (- (+ (* 2 t) (js/Math.sin (* 2 t)))
-                           (* Math/PI (js/Math.sin phi)))
-                      f' (* 2 (+ 1 (js/Math.cos (* 2 t))))
-                      delta (/ f f')]
-                  (if (or (> i 30) (< (js/Math.abs delta) epsilon))
-                    t
-                    (recur (- t delta) (inc i)))))
+        ;; At the poles theta = phi, and Newton would divide by f' = 0.
+        theta (if (> (js/Math.abs phi) (- (/ Math/PI 2) epsilon))
+                phi
+                (loop [t phi
+                       i 0]
+                  (let [f (- (+ (* 2 t) (js/Math.sin (* 2 t)))
+                             (* Math/PI (js/Math.sin phi)))
+                        f' (* 2 (+ 1 (js/Math.cos (* 2 t))))
+                        delta (/ f f')]
+                    (if (or (> i 30) (< (js/Math.abs delta) epsilon))
+                      t
+                      (recur (- t delta) (inc i))))))
         x (* (/ width 4)
              (/ (* 2) Math/PI)
              lambda
@@ -314,60 +357,70 @@
     [(+ (/ width 2) (* sx xn))
      (- (* sy yn))]))
 
-(defn country->paths [proj-fn country width height]
-  (map-indexed
-   (fn [pi poly]
-     {:id pi
-      :path (when (seq poly)
-              (str "M "
-                   (->> poly
-                        (map (fn [[lon lat]]
-                               (let [[x y] (proj-fn lon lat width height)]
-                                 (str x "," y))))
-                        (str/join " L "))
-                   " Z"))})
-   (:polygons country)))
+(defn round2 [x]
+  (/ (js/Math.round (* x 100)) 100))
+
+(defn country->path
+  "One SVG path for all of a country's polygons, holes included (drawn with
+  fill-rule evenodd)."
+  [proj-fn country width height]
+  (let [out #js []]
+    (doseq [^js polygon (:polygons country)
+            ^js ring polygon]
+      (dotimes [i (alength ring)]
+        (let [^js point (aget ring i)
+              [x y] (proj-fn (aget point 0) (aget point 1) width height)]
+          (.push out (if (zero? i) "M" "L") (round2 x) "," (round2 y))))
+      (.push out "Z"))
+    (.join out "")))
+
+(def projections
+  {:mercator [mercator-projection 1000]
+   :equirectangular [equirectangular-projection 500]
+   :miller [miller-projection 750]
+   :gall-peters [gall-peters-projection 650]
+   :robinson [robinson-projection 500]
+   :mollweide [mollweide-projection 500]
+   :eckert4 [eckert4-projection 500]})
+
+;; [resolution projection] -> vector of path strings. Projecting the 10m data
+;; takes a moment, so switching back to a projection seen before is instant.
+;; Plain def (not defonce), so it's cleared when this file is hot-reloaded.
+(def path-cache
+  (atom {}))
 
 (rf/reg-sub
   ::projected-paths
+  :<- [::shown-resolution]
   :<- [::countries]
-  (fn [countries [_ idx projection]]
-    (let [c (get countries idx)
-          proj-fn (case projection
-                    :mercator mercator-projection
-                    :equirectangular equirectangular-projection
-                    :miller miller-projection
-                    :gall-peters gall-peters-projection
-                    :robinson robinson-projection
-                    :mollweide mollweide-projection
-                    :eckert4 eckert4-projection
-                    mercator-projection)
-          height (case projection
-                   :equirectangular 500
-                   :miller 750
-                   :gall-peters 650
-                   :robinson 500
-                   :mollweide 500
-                   :eckert4 500
-                   1000)]
-      (when c
-        (country->paths proj-fn c 1000 height)))))
+  :<- [::projection]
+  (fn [[resolution countries projection] _]
+    (let [k [resolution projection]]
+      (or (get @path-cache k)
+          (let [[proj-fn height] (get projections projection
+                                      (:mercator projections))
+                paths (mapv #(country->path proj-fn % 1000 height)
+                            countries)]
+            (swap! path-cache assoc k paths)
+            paths)))))
 
-(defn country [{:keys [idx projection]}]
-  (let [paths @(rf/subscribe [::projected-paths idx projection])
-        country (get @(rf/subscribe [::countries])
-                     idx)]
+(defn countries-layer []
+  (let [countries @(rf/subscribe [::countries])
+        paths @(rf/subscribe [::projected-paths])]
     [:<>
-     (for [{:keys [id path]} paths]
-       ^{:key (str "p-" idx "-" id)}
-       [:path {:d path
+     (for [[i {:keys [fill]}] (map-indexed vector countries)]
+       ^{:key i}
+       [:path {:d (nth paths i)
                :stroke "#333"
                :strokeWidth 0.5
-               :fill (:fill country)
+               :fill fill
+               :fillRule "evenodd"
                :vectorEffect "non-scaling-stroke"}])]))
 
 (defn sidebar []
-  (let [projection @(rf/subscribe [::projection])]
+  (let [projection @(rf/subscribe [::projection])
+        resolution @(rf/subscribe [::resolution])
+        fetching? @(rf/subscribe [::fetching?])]
     [:div {:style {:display "flex"
                    :flexDirection "column"
                    :width "220px"
@@ -391,7 +444,24 @@
       [:option {:value "gall-peters"} "Gall–Peters"]
       [:option {:value "robinson"} "Robinson"]
       [:option {:value "mollweide"} "Mollweide"]
-      [:option {:value "eckert4"} "Eckert IV"]]]))
+      [:option {:value "eckert4"} "Eckert IV"]]
+     [:label {:for "resolution-select"
+              :style {:marginTop "16px"
+                      :marginBottom "8px"
+                      :fontWeight "bold"}}
+      "Boundaries:"]
+     [:select {:id "resolution-select"
+               :value (name resolution)
+               :on-change #(rf/dispatch
+                            [::set-resolution
+                             (keyword (.. % -target -value))])
+               :style {:padding "4px"
+                       :fontSize "14px"}}
+      (for [[k label] resolutions]
+        ^{:key k}
+        [:option {:value (name k)} label])]
+     (when fetching?
+       [:p {:style {:color "#666"}} "Loading…"])]))
 
 (defn world []
   (let [svg-ref (ra/atom nil)]
@@ -405,34 +475,29 @@
                              #js {:passive false})))
       :reagent-render
       (fn []
-        (let [countries @(rf/subscribe [::countries])
-              projection @(rf/subscribe [::projection])]
-          [:div {:style {:display "flex"
-                         :flexDirection "row"
-                         :height "100vh"
-                         :overflow "hidden"}}
-           [:svg {:ref #(reset! svg-ref %)
-                  :viewBox "0 -500 1000 1000"
-                  :style {:flex "1"
-                          :cursor (if (:active? @drag)
-                                    "grabbing"
-                                    "grab")}
-                  :on-context-menu #(.preventDefault %)
-                  :on-mouse-down on-mouse-down
-                  :on-mouse-move on-mouse-move
-                  :on-mouse-up on-mouse-up
-                  :on-mouse-leave on-mouse-up}
-            [:g {:transform (transform-string)}
-             [:rect {:x 0
-                     :y -500
-                     :width 1000
-                     :height 1000
-                     :fill water-color}]
-             (for [i (range (count countries))]
-               ^{:key i}
-               [country {:idx i
-                         :projection projection}])]]
-           [sidebar]]))})))
+        [:div {:style {:display "flex"
+                       :flexDirection "row"
+                       :height "100vh"
+                       :overflow "hidden"}}
+         [:svg {:ref #(reset! svg-ref %)
+                :viewBox "0 -500 1000 1000"
+                :style {:flex "1"
+                        :cursor (if (:active? @drag)
+                                  "grabbing"
+                                  "grab")}
+                :on-context-menu #(.preventDefault %)
+                :on-mouse-down on-mouse-down
+                :on-mouse-move on-mouse-move
+                :on-mouse-up on-mouse-up
+                :on-mouse-leave on-mouse-up}
+          [:g {:transform (transform-string)}
+           [:rect {:x 0
+                   :y -500
+                   :width 1000
+                   :height 1000
+                   :fill water-color}]
+           [countries-layer]]]
+         [sidebar]])})))
 
 (defonce ^:dynamic *app-root*
   nil)
