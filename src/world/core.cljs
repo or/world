@@ -609,6 +609,42 @@
         name @hovered]
     (first (filter #(= name (:name %)) countries))))
 
+(defn lon-lat->screen-fn
+  "A function from lon, lat to screen (viewBox) coordinates in the current
+  view. Call it while rendering, like current-view."
+  []
+  (let [projection @(rf/subscribe [::projection])
+        center @(rf/subscribe [::central-meridian])
+        view (current-view @(rf/subscribe [::south-up?]))
+        [proj-fn height] (proj/get-projection projection)]
+    (fn [lon lat]
+      (to-screen view
+                 (proj-fn (grid/normalize-lon (- lon center)) lat 1000 height)))))
+
+(defn hovered-capitals
+  "The hovered country's capitals, where they are on the screen."
+  [lon-lat->screen]
+  (vec (for [{:keys [lat lon] :as capital} (:capitals (hovered-country))
+             :let [[x y] (lon-lat->screen lon lat)]]
+         (assoc capital :x x :y y))))
+
+(def capital-font-size
+  13)
+
+(defn text-width
+  "Roughly: characters are about 0.6 em wide on average."
+  [font-size text]
+  (* 0.6 font-size (count text)))
+
+(defn capital-boxes
+  "Where capital markers and their labels are, as [left top right bottom]."
+  [capitals]
+  (for [{:keys [x y name note]} capitals]
+    [(- x 13)
+     (- y 13)
+     (+ x 15 (text-width capital-font-size (str name (when note (str " (" note ")")))))
+     (+ y 13)]))
+
 (defn capital-marker [x y name note]
   ;; a cross in a circle, dark with a white halo to stand out on any colour
   (let [shape [:<>
@@ -626,7 +662,7 @@
      [:text {:x 15
              :y 0
              :dominantBaseline "middle"
-             :fontSize 13
+             :fontSize capital-font-size
              :fontWeight "bold"
              :fill "#111"
              :stroke "white"
@@ -648,41 +684,70 @@
     (js/Math.log2 (/ (* 1000 @zoom scale) 256))))
 
 (defn without-overlaps
-  "The labels that fit without overlapping more important ones before them:
-  [{:x :y :font-size :text}], centered on x, y."
-  [labels]
+  "The labels that fit without overlapping more important ones before them, or
+  obstacles: [{:x :y :font-size :text}], centered on x, y. A label can have
+  :offsets, vertical ones to try in turn, and be :forced, placed at the first
+  even if it doesn't fit."
+  [labels obstacles]
   (let [box (fn [{:keys [x y font-size text]}]
-              ;; roughly: characters are about 0.6 em wide on average
-              (let [half-w (/ (* 0.6 font-size (count text)) 2)
+              (let [half-w (/ (text-width font-size text) 2)
                     half-h (/ font-size 2)]
                 [(- x half-w) (- y half-h) (+ x half-w) (+ y half-h)]))
         overlap? (fn [[l1 t1 r1 b1] [l2 t2 r2 b2]]
                    (and (< l1 r2) (< l2 r1) (< t1 b2) (< t2 b1)))]
     (:placed
-     (reduce (fn [{:keys [boxes] :as acc} label]
-               (let [b (box label)]
-                 (if (some #(overlap? b %) boxes)
-                   acc
+     (reduce (fn [{:keys [boxes] :as acc} {:keys [offsets forced?] :as label}]
+               (let [candidates (for [dy (or offsets [0])]
+                                  (update label :y + dy))
+                     fits? (fn [l] (not-any? #(overlap? (box l) %) boxes))
+                     placed (or (first (filter fits? candidates))
+                                (when forced? (first candidates)))]
+                 (if placed
                    (-> acc
-                       (update :placed conj label)
-                       (update :boxes conj b)))))
+                       (update :placed conj placed)
+                       (update :boxes conj (box placed)))
+                   acc)))
              {:placed []
-              :boxes []}
+              :boxes (vec obstacles)}
              labels))))
 
 (defn names-layer
   "Country names, from Natural Earth's zoom level for each on, most important
   first, leaving out those that would overlap. Growing a bit as you zoom in
-  further. In screen coordinates, to stay upright."
+  further. The hovered country's always, also when they're turned off, and
+  first. In screen coordinates, to stay upright."
   []
   (let [countries @(rf/subscribe [::countries])
-        projection @(rf/subscribe [::projection])
-        center @(rf/subscribe [::central-meridian])
-        view (current-view @(rf/subscribe [::south-up?]))
-        [proj-fn height] (proj/get-projection projection)
+        country-names? @(rf/subscribe [::country-names?])
+        hovered-name @hovered
+        lon-lat->screen (lon-lat->screen-fn)
         [left top right bottom] (visible-area)
-        z (web-zoom)]
-    (when @(rf/subscribe [::country-names?])
+        z (web-zoom)
+        labels
+        (without-overlaps
+         (for [{:keys [name label min-label]}
+               (sort-by (juxt #(not= hovered-name (:name %))
+                              :min-label
+                              (comp - :area))
+                        countries)
+               :let [hovered? (= hovered-name name)]
+               :when (or hovered?
+                         (and country-names? (>= z min-label)))
+               :let [[x y] (apply lon-lat->screen label)
+                     font-size (cond-> (clamp (+ 12 (* 2 (- z min-label))) 11 18)
+                                 ;; also when below its zoom level
+                                 hovered? (max 13))]
+               :when (and (< left x right) (< top y bottom))]
+           (cond-> {:x x
+                    :y y
+                    :font-size font-size
+                    :text name}
+             ;; Small countries' names would be on their capital: then above
+             ;; or below it.
+             hovered? (assoc :offsets [0 (- (+ 13 font-size)) (+ 13 font-size)]
+                             :forced? true)))
+         (capital-boxes (hovered-capitals lon-lat->screen)))]
+    (when (or country-names? hovered-name)
       [:g {:fill "#333"
            :stroke "rgba(255, 255, 255, 0.8)"
            :strokeWidth 3
@@ -693,23 +758,7 @@
            :dominantBaseline "middle"
            :pointerEvents "none"
            :style {:userSelect "none"}}
-       (for [{:keys [x y font-size text]}
-             (without-overlaps
-              (for [{:keys [name label min-label]}
-                    (sort-by (juxt :min-label (comp - :area)) countries)
-                    :when (>= z min-label)
-                    :let [[lon lat] label
-                          [x y] (to-screen view
-                                           (proj-fn (grid/normalize-lon
-                                                     (- lon center))
-                                                    lat
-                                                    1000
-                                                    height))]
-                    :when (and (< left x right) (< top y bottom))]
-                {:x x
-                 :y y
-                 :font-size (clamp (+ 12 (* 2 (- z min-label))) 11 18)
-                 :text name}))]
+       (for [{:keys [x y font-size text]} labels]
          ^{:key text}
          [:text {:x x
                  :y y
@@ -720,19 +769,11 @@
   "Markers for the hovered country's capitals. In screen coordinates, so
   they're the same size at any zoom."
   []
-  (let [{:keys [capitals]} (hovered-country)
-        projection @(rf/subscribe [::projection])
-        center @(rf/subscribe [::central-meridian])
-        view (current-view @(rf/subscribe [::south-up?]))
-        [proj-fn height] (proj/get-projection projection)]
+  ;; not in the for below: it's lazy, so it'd be too late to notice changes
+  (let [capitals (hovered-capitals (lon-lat->screen-fn))]
     [:g {:pointerEvents "none"
          :style {:userSelect "none"}}
-     (for [{:keys [name note lat lon]} capitals
-           :let [[x y] (to-screen view
-                                  (proj-fn (grid/normalize-lon (- lon center))
-                                           lat
-                                           1000
-                                           height))]]
+     (for [{:keys [x y name note]} capitals]
        ^{:key name}
        [capital-marker x y name note])]))
 
