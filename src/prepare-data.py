@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import math
+import re
 from functools import cache
 
 import geopandas as gpd
@@ -243,40 +244,64 @@ def report_colors(neighbours, nearby, colors, names):
 
 # Capitals where Natural Earth's populated places don't give a good answer:
 # countries with several capitals (it may mark a former or de facto one as
-# the capital), and dependencies whose capital it doesn't mark at all.
+# the capital), and dependencies whose capital it doesn't mark at all. A note
+# in parentheses is shown with the name.
 CAPITALS = {
-    "ZAF": "Pretoria, Cape Town, Bloemfontein",
-    "BOL": "Sucre, La Paz",
-    "SWZ": "Mbabane, Lobamba",
-    "CIV": "Yamoussoukro",
-    "MMR": "Naypyidaw",
-    "TZA": "Dodoma",
-    "BEN": "Porto-Novo",
-    "LKA": "Sri Jayawardenepura Kotte",
-    "PSX": "Ramallah (administrative)",
-    "CYN": "North Nicosia",
-    "PRI": "San Juan",
-    "FRO": "Tórshavn",
-    "GRL": "Nuuk",
-    "JEY": "Saint Helier",
-    "GGY": "Saint Peter Port",
-    "VIR": "Charlotte Amalie",
-    "VGB": "Road Town",
-    "SXM": "Philipsburg",
-    "MAF": "Marigot",
-    "AIA": "The Valley",
-    "BLM": "Gustavia",
-    "SPM": "Saint-Pierre",
-    "MSR": "Brades (de facto)",
-    "SHN": "Jamestown",
-    "WLF": "Mata-Utu",
-    "NRU": "Yaren (de facto)",
-    "MNP": "Saipan",
-    "COK": "Avarua",
-    "NIU": "Alofi",
-    "NFK": "Kingston",
-    "PCN": "Adamstown",
-    "SGS": "King Edward Point",
+    "ZAF": ["Pretoria", "Cape Town", "Bloemfontein"],
+    "BOL": ["Sucre", "La Paz"],
+    "SWZ": ["Mbabane", "Lobamba"],
+    "CIV": ["Yamoussoukro"],
+    "MMR": ["Naypyidaw"],
+    "TZA": ["Dodoma"],
+    "BEN": ["Porto-Novo"],
+    "LKA": ["Sri Jayawardenepura Kotte"],
+    "PSX": ["Ramallah (administrative)"],
+    "CYN": ["North Nicosia"],
+    "PRI": ["San Juan"],
+    "FRO": ["Tórshavn"],
+    "GRL": ["Nuuk"],
+    "JEY": ["Saint Helier"],
+    "GGY": ["Saint Peter Port"],
+    "VIR": ["Charlotte Amalie"],
+    "VGB": ["Road Town"],
+    "SXM": ["Philipsburg"],
+    "MAF": ["Marigot"],
+    "AIA": ["The Valley"],
+    "BLM": ["Gustavia"],
+    "SPM": ["Saint-Pierre"],
+    "MSR": ["Brades (de facto)"],
+    "SHN": ["Jamestown"],
+    "WLF": ["Mata-Utu"],
+    "NRU": ["Yaren (de facto)"],
+    "MNP": ["Saipan"],
+    "COK": ["Avarua"],
+    "NIU": ["Alofi"],
+    "NFK": ["Kingston"],
+    "PCN": ["Adamstown"],
+    "SGS": ["King Edward Point"],
+}
+
+# Coordinates (lat, lon) of capitals in CAPITALS that aren't in Natural
+# Earth's populated places.
+CAPITAL_LOCATIONS = {
+    "North Nicosia": (35.18, 33.36),
+    "Saint Helier": (49.19, -2.11),
+    "Saint Peter Port": (49.46, -2.54),
+    "Charlotte Amalie": (18.34, -64.93),
+    "Road Town": (18.43, -64.62),
+    "Philipsburg": (18.03, -63.05),
+    "Marigot": (18.07, -63.08),
+    "The Valley": (18.22, -63.05),
+    "Gustavia": (17.90, -62.85),
+    "Saint-Pierre": (46.78, -56.18),
+    "Brades": (16.79, -62.21),
+    "Jamestown": (-15.92, -5.72),
+    "Mata-Utu": (-13.28, -176.17),
+    "Yaren": (-0.55, 166.92),
+    "Saipan": (15.19, 145.75),
+    "Kingston": (-29.06, 167.96),
+    "Adamstown": (-25.07, -130.10),
+    "King Edward Point": (-54.28, -36.49),
 }
 
 # Natural Earth's populated places use a different code for some countries.
@@ -286,28 +311,44 @@ PLACE_CODES = {
 
 
 def find_capitals(data):
-    """Country code -> its capital(s), or none."""
+    """Country code -> its capitals: [{name, note, lat, lon}], maybe none."""
     places = gpd.read_file("data/populated-places/ne_10m_populated_places_simple.shp")
 
-    def places_of(code, feature_class):
+    def places_of(code, feature_class=None):
         code = PLACE_CODES.get(code, code)
-        return list(
-            places[
-                (places["adm0_a3"] == code) & (places["featurecla"] == feature_class)
-            ]["name"]
-        )
+        found = places[places["adm0_a3"] == code]
+        if feature_class:
+            found = found[found["featurecla"] == feature_class]
+        return found
+
+    def capital(name, note, lat, lon):
+        return {"name": name, "note": note, "lat": round(lat, 4), "lon": round(lon, 4)}
+
+    def from_place(place):
+        return capital(place["name"], None, place["latitude"], place["longitude"])
+
+    def from_table(code, entry):
+        name, note = re.fullmatch(r"(.*?)(?: \((.*)\))?", entry).groups()
+        if name in CAPITAL_LOCATIONS:
+            return capital(name, note, *CAPITAL_LOCATIONS[name])
+        place = places_of(code)
+        place = place[place["name"] == name]
+        assert len(place) == 1, f"{name}: add it to CAPITAL_LOCATIONS"
+        return {**from_place(place.iloc[0]), "note": note}
 
     capitals = {}
     for code in data["ADM0_A3"]:
-        capital = places_of(code, "Admin-0 capital")
+        capital_places = places_of(code, "Admin-0 capital")
         # Dependencies' capitals, e.g. Nuuk for Greenland
-        region_capital = places_of(code, "Admin-0 region capital")
+        region_capitals = places_of(code, "Admin-0 region capital")
         if code in CAPITALS:
-            capitals[code] = CAPITALS[code]
-        elif len(capital) == 1:
-            capitals[code] = capital[0]
-        elif len(region_capital) == 1:
-            capitals[code] = region_capital[0]
+            capitals[code] = [from_table(code, entry) for entry in CAPITALS[code]]
+        elif len(capital_places) == 1:
+            capitals[code] = [from_place(capital_places.iloc[0])]
+        elif len(region_capitals) == 1:
+            capitals[code] = [from_place(region_capitals.iloc[0])]
+        else:
+            capitals[code] = []
     return capitals
 
 
@@ -362,7 +403,7 @@ def main():
                 "iso_a2": None
                 if country["ISO_A2_EH"] == "-99"
                 else country["ISO_A2_EH"],
-                "capital": capitals.get(code),
+                "capitals": capitals[code],
                 "population": int(country["POP_EST"]) or None,
                 "population_year": int(country["POP_YEAR"]),
                 "area": round(area),  # km²

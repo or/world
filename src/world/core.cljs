@@ -114,7 +114,12 @@
           {:name (.-name c)
            :long-name (.-long_name c)
            :iso-a2 (.-iso_a2 c)
-           :capital (.-capital c)
+           :capitals (mapv (fn [^js capital]
+                             {:name (.-name capital)
+                              :note (.-note capital)
+                              :lat (.-lat capital)
+                              :lon (.-lon capital)})
+                           (.-capitals c))
            :population (.-population c)
            :population-year (.-population_year c)
            :area (.-area c)
@@ -507,14 +512,27 @@
         half-h (/ h k 2)]
     [(- cx half-w) (- cy half-h) (+ cx half-w) (+ cy half-h)]))
 
+(defn to-screen
+  "Map coordinates -> screen (viewBox) coordinates, for the current view."
+  [south-up? p]
+  (let [[x y] (rotate-south-up south-up? p)
+        s @zoom
+        [tx ty] @translate]
+    [(+ tx (* s x)) (+ ty (* s y))]))
+
+(defn from-screen
+  "Screen (viewBox) coordinates -> map coordinates, for the current view."
+  [south-up? [x y]]
+  (let [s @zoom
+        [tx ty] @translate]
+    (rotate-south-up south-up? [(/ (- x tx) s) (/ (- y ty) s)])))
+
 (defn grid-labels-layer []
   (let [{:keys [grid? step equator? prime-meridian? labels?]}
         @(rf/subscribe [::grid-settings])
         projection @(rf/subscribe [::projection])
         center @(rf/subscribe [::central-meridian])
-        south-up? @(rf/subscribe [::south-up?])
-        s @zoom
-        [tx ty] @translate]
+        south-up? @(rf/subscribe [::south-up?])]
     (when (and labels? (or grid? equator? prime-meridian?))
       [:g {:fontSize grid/font-size
            :fill "#222"
@@ -532,13 +550,8 @@
                :grid? grid?
                :equator? equator?
                :prime-meridian? prime-meridian?
-               :to-screen (fn [p]
-                            (let [[x y] (rotate-south-up south-up? p)]
-                              [(+ tx (* s x)) (+ ty (* s y))]))
-               :from-screen (fn [[x y]]
-                              (rotate-south-up south-up?
-                                               [(/ (- x tx) s)
-                                                (/ (- y ty) s)]))
+               :to-screen (partial to-screen south-up?)
+               :from-screen (partial from-screen south-up?)
                :visible (visible-area)})]
          ^{:key key}
          [:text {:x x
@@ -546,6 +559,44 @@
                  :textAnchor anchor
                  :dominantBaseline baseline}
           text])])))
+
+(defn hovered-country []
+  (let [countries @(rf/subscribe [::countries])
+        name @hovered]
+    (first (filter #(= name (:name %)) countries))))
+
+(defn capital-marker [x y]
+  ;; a cross in a circle, dark with a white halo to stand out on any colour
+  (let [shape [:<>
+               [:circle {:r 7}]
+               [:path {:d "M-12,0H12M0,-12V12"}]]]
+    [:g {:transform (str "translate(" x " " y ")")
+         :fill "none"}
+     [:g {:stroke "white"
+          :strokeWidth 4.5}
+      shape]
+     [:g {:stroke "#111"
+          :strokeWidth 1.75}
+      shape]]))
+
+(defn capitals-layer
+  "Markers for the hovered country's capitals. In screen coordinates, so
+  they're the same size at any zoom."
+  []
+  (let [{:keys [capitals]} (hovered-country)
+        projection @(rf/subscribe [::projection])
+        center @(rf/subscribe [::central-meridian])
+        south-up? @(rf/subscribe [::south-up?])
+        [proj-fn height] (proj/get-projection projection)]
+    [:g {:pointerEvents "none"}
+     (for [{:keys [name lat lon]} capitals
+           :let [[x y] (to-screen south-up?
+                                  (proj-fn (grid/normalize-lon (- lon center))
+                                           lat
+                                           1000
+                                           height))]]
+       ^{:key name}
+       [capital-marker x y])]))
 
 (defn checkbox [label checked? on-change]
   [:label {:style {:marginTop "8px"}}
@@ -689,10 +740,8 @@
     :else (.toLocaleString n "en")))
 
 (defn country-info []
-  (let [countries @(rf/subscribe [::countries])
-        name @hovered
-        {:keys [long-name iso-a2 capital population population-year]}
-        (first (filter #(= name (:name %)) countries))]
+  (let [{:keys [long-name iso-a2 capitals population population-year]}
+        (hovered-country)]
     (when long-name
       [:div {:style {:position "absolute"
                      :right "16px"
@@ -717,8 +766,12 @@
           [:div {:style {:fontSize "28px"
                          :lineHeight "1"}}
            (flag-emoji iso-a2)])]
-       (when capital
-         [:div "Capital: " capital])
+       (when (seq capitals)
+         [:div
+          (if (next capitals) "Capitals: " "Capital: ")
+          (str/join ", " (for [{:keys [name note]} capitals]
+                           (cond-> name
+                             note (str " (" note ")"))))])
        (when population
          [:div "Population: " (format-population population)
           [:span {:style {:color "#777"}} " (" population-year ")"]])])))
@@ -786,7 +839,8 @@
                     :height 1000
                     :fill water-color}]
             [rotated-layer]]
-           [grid-labels-layer]]
+           [grid-labels-layer]
+           [capitals-layer]]
           [country-info]]
          [sidebar]])})))
 
