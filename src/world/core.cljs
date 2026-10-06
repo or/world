@@ -575,7 +575,7 @@
         name @hovered]
     (first (filter #(= name (:name %)) countries))))
 
-(defn capital-marker [x y name]
+(defn capital-marker [x y name note]
   ;; a cross in a circle, dark with a white halo to stand out on any colour
   (let [shape [:<>
                [:circle {:r 7}]
@@ -599,7 +599,9 @@
              :strokeWidth 3.5
              :strokeLinejoin "round"
              :paintOrder "stroke"}
-      name]]))
+      name
+      (when note
+        [:tspan {:fontWeight "normal"} " (" note ")"])]]))
 
 (defn capitals-layer
   "Markers for the hovered country's capitals. In screen coordinates, so
@@ -612,14 +614,14 @@
         [proj-fn height] (proj/get-projection projection)]
     [:g {:pointerEvents "none"
          :style {:userSelect "none"}}
-     (for [{:keys [name lat lon]} capitals
+     (for [{:keys [name note lat lon]} capitals
            :let [[x y] (to-screen view
                                   (proj-fn (grid/normalize-lon (- lon center))
                                            lat
                                            1000
                                            height))]]
        ^{:key name}
-       [capital-marker x y name])]))
+       [capital-marker x y name note])]))
 
 (defn checkbox [label checked? on-change]
   [:label {:style {:marginTop "8px"}}
@@ -789,12 +791,16 @@
           [:div {:style {:fontSize "28px"
                          :lineHeight "1"}}
            (flag-emoji iso-a2)])]
-       (when (seq capitals)
-         [:div
-          (if (next capitals) "Capitals: " "Capital: ")
-          (str/join ", " (for [{:keys [name note]} capitals]
-                           (cond-> name
-                             note (str " (" note ")"))))])
+       (let [capital-names (for [{:keys [name note]} capitals]
+                             (cond-> name
+                               note (str " (" note ")")))]
+         (if (next capitals)
+           [:div "Capitals:"
+            (for [capital capital-names]
+              ^{:key capital}
+              [:div {:style {:paddingLeft "12px"}} capital])]
+           (when (seq capitals)
+             [:div "Capital: " (first capital-names)])))
        (when population
          [:div "Population: " (format-population population)
           [:span {:style {:color "#777"}} " (" population-year ")"]])])))

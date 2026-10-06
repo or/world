@@ -243,18 +243,29 @@ def report_colors(neighbours, nearby, colors, names):
 
 
 # Capitals where Natural Earth's populated places don't give a good answer:
-# countries with several capitals (it may mark a former or de facto one as
-# the capital), and dependencies whose capital it doesn't mark at all. A note
-# in parentheses is shown with the name.
+# countries with several capitals (it doesn't say reliably what each is for,
+# and may mark a former one as the capital), outdated ones, and dependencies
+# whose capital it doesn't mark at all. A note in parentheses, e.g. what the
+# capital is for, is shown with the name.
 CAPITALS = {
-    "ZAF": ["Pretoria", "Cape Town", "Bloemfontein"],
-    "BOL": ["Sucre", "La Paz"],
-    "SWZ": ["Mbabane", "Lobamba"],
-    "CIV": ["Yamoussoukro"],
+    "ZAF": [
+        "Pretoria (executive)",
+        "Cape Town (legislative)",
+        "Bloemfontein (judicial)",
+    ],
+    "BOL": ["Sucre (constitutional)", "La Paz (seat of government)"],
+    "NLD": ["Amsterdam (constitutional)", "The Hague (seat of government)"],
+    "MYS": ["Kuala Lumpur (official)", "Putrajaya (administrative)"],
+    "LKA": ["Sri Jayawardenepura Kotte (legislative)", "Colombo (executive)"],
+    "BEN": ["Porto-Novo (official)", "Cotonou (seat of government)"],
+    "CIV": ["Yamoussoukro (official)", "Abidjan (seat of government)"],
+    "SWZ": ["Mbabane (administrative)", "Lobamba (legislative)"],
+    "CHL": ["Santiago", "Valparaíso (legislative)"],
+    "BDI": ["Gitega (political)", "Bujumbura (economic)"],
     "MMR": ["Naypyidaw"],
     "TZA": ["Dodoma"],
-    "BEN": ["Porto-Novo"],
-    "LKA": ["Sri Jayawardenepura Kotte"],
+    "KAZ": ["Astana"],
+    "PLW": ["Ngerulmud"],
     "PSX": ["Ramallah (administrative)"],
     "CYN": ["North Nicosia"],
     "PRI": ["San Juan"],
@@ -284,6 +295,8 @@ CAPITALS = {
 # Coordinates (lat, lon) of capitals in CAPITALS that aren't in Natural
 # Earth's populated places.
 CAPITAL_LOCATIONS = {
+    "Astana": (51.17, 71.43),
+    "Ngerulmud": (7.50, 134.62),
     "North Nicosia": (35.18, 33.36),
     "Saint Helier": (49.19, -2.11),
     "Saint Peter Port": (49.46, -2.54),
