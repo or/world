@@ -96,40 +96,19 @@
 
 (defonce water-color "#1f77b4")
 
-(def country-colors
-  ["#9dc3c2"
-   "#a7c8a0"
-   "#c5ca91"
-   "#e0cfa3"
-   "#e1b6a0"
-   "#d4a3a3"
-   "#c4a3b5"
-   "#b4a3c6"
-   "#a3aad0"
-   "#a3bfd8"
-   "#92bccc"
-   "#8fbfb8"
-   "#a1c1a9"
-   "#c2c2a3"
-   "#d3b7a3"
-   "#c6aba3"])
-
 (def resolutions
   ;; Natural Earth scales, see src/prepare-data.py
   [[:110m "Low (1:110m)"]
    [:50m "Medium (1:50m)"]
    [:10m "High (1:10m)"]])
 
-(defn country-fill [name]
-  ;; Stable per country, so it doesn't change when switching resolutions.
-  (nth country-colors (mod (hash name) (count country-colors))))
-
 (defn parse-countries [data]
   ;; Coordinates stay plain JS arrays: converting hundreds of thousands of
   ;; points with js->clj is slow, and nothing needs them as persistent data.
   (mapv (fn [^js c]
           {:name (.-name c)
-           :fill (country-fill (.-name c))
+           ;; assigned in prepare-data.py, different from neighbours'
+           :fill (.-fill c)
            :label-position (vec (.-label_position c))
            :polygons (.-polygons c)
            :bounds (mapv clip/bounds (.-polygons c))})
