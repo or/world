@@ -187,7 +187,8 @@
 (rf/reg-fx
   :fetch-countries
   (fn [resolution]
-    (let [url (str "/countries-" (name resolution) ".json")]
+    ;; relative, so the app works in a subdirectory, e.g. on GitHub Pages
+    (let [url (str "countries-" (name resolution) ".json")]
       (-> (js/fetch url)
           (.then
            (fn [resp]

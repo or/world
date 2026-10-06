@@ -21,4 +21,8 @@
    :compiler-options {:source-map true
                       :source-map-detail-level :all}
 
-   :modules {:main {:init-fn world.core/init}}}}}
+   :modules {:main {:init-fn world.core/init}}
+
+   ;; for deploying, see src/deploy.sh
+   :release {:output-dir "build/release/js/generated"
+             :asset-path "js/generated"}}}}
