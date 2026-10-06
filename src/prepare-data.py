@@ -62,6 +62,11 @@ MIN_NEIGHBOUR_DIFFERENCE = 14
 # with weight exp(-relative gap) below this are ignored.
 MIN_NEARBY_WEIGHT = 0.05
 
+# Countries sharing a neighbour (siblings) should preferably have different
+# colours too, as on the map they surround the same country. Their weight is
+# this, plus their nearby weight if they're also nearby.
+SIBLING_WEIGHT = 1.0
+
 
 def find_neighbours(data):
     """Country code -> set of codes of neighbouring countries."""
@@ -100,20 +105,43 @@ def find_nearby(data, neighbours):
     return nearby
 
 
+def find_siblings(neighbours):
+    """Country code -> codes of countries sharing a neighbour with it."""
+    return {
+        code: {
+            c
+            for n in neighbours[code]
+            for c in neighbours[n]
+            if c != code and c not in neighbours[code]
+        }
+        for code in neighbours
+    }
+
+
 def assign_colors(neighbours, nearby):
     """Country code -> colour, clearly different from its neighbours' colours.
 
     Colours countries with the most coloured neighbours first (DSATUR). Of the
     colours clearly different from all its neighbours', each country gets the
-    one least used by nearby countries, weighted by how near they are (see
-    MIN_NEARBY_WEIGHT). Similar colours count too. Remaining
-    ties go to the least used colour overall, to use the whole palette. If no
-    colour is clearly different from the neighbours', it gets the one furthest
-    from them. Then each country's colour is improved, given all others.
+    one least similar to those of its siblings (countries sharing a neighbour)
+    and nearby countries, weighted: SIBLING_WEIGHT plus how near they are (see
+    MIN_NEARBY_WEIGHT). Remaining ties go to the least used colour overall, to
+    use the whole palette. If no colour is clearly different from the
+    neighbours', it gets the one furthest from them. Then each country's colour
+    is improved, given all others.
     """
     colors = {}
     usage = {c: 0 for c in PALETTE}
     difference = cache(delta_e)
+    siblings = find_siblings(neighbours)
+    # Country code -> {code of a sibling or nearby country: weight}
+    others = {
+        code: {
+            c: SIBLING_WEIGHT * (c in siblings[code]) + nearby[code].get(c, 0)
+            for c in siblings[code] | nearby[code].keys()
+        }
+        for code in neighbours
+    }
 
     def constraint(code):
         coloured = [n for n in neighbours[code] if n in colors]
@@ -125,10 +153,16 @@ def assign_colors(neighbours, nearby):
             default=100,
         )
 
-    def nearby_similarity(color, code):
+    def similarity(color, code):
+        """How similar a colour is to those of siblings and nearby countries.
+
+        Cubed, so that look-alike colours count much more than ones that are
+        merely not clearly different: with only 21 colours, many siblings can't
+        be clearly different, but they needn't look alike."""
         return sum(
-            weight * max(0, 1 - difference(color, colors[c]) / MIN_NEIGHBOUR_DIFFERENCE)
-            for c, weight in nearby[code].items()
+            weight
+            * max(0, 1 - difference(color, colors[c]) / MIN_NEIGHBOUR_DIFFERENCE) ** 3
+            for c, weight in others[code].items()
             if c in colors
         )
 
@@ -137,7 +171,7 @@ def assign_colors(neighbours, nearby):
             PALETTE,
             key=lambda c: (
                 min(neighbour_difference(c, code), MIN_NEIGHBOUR_DIFFERENCE),
-                -nearby_similarity(c, code),
+                -similarity(c, code),
                 # when improving: only change for a better colour
                 c == colors.get(code),
                 -usage[c],
@@ -166,6 +200,10 @@ def assign_colors(neighbours, nearby):
     return colors
 
 
+# Only for reporting: colours this similar look alike.
+LOOK_ALIKE = 8
+
+
 def report_colors(neighbours, nearby, colors, names):
     pairs = sorted(
         (delta_e(colors[a], colors[b]), names[a], names[b])
@@ -177,21 +215,24 @@ def report_colors(neighbours, nearby, colors, names):
     for d, a, b in pairs[:5]:
         print(f"  {d:5.1f}  {a} – {b}")
 
-    similar = sorted(
+    siblings = find_siblings(neighbours)
+    look_alikes = sorted(
         (
-            (-weight, delta_e(colors[a], colors[b]), names[a], names[b])
-            for a, others in nearby.items()
-            for b, weight in others.items()
-            if a < b and delta_e(colors[a], colors[b]) < MIN_NEIGHBOUR_DIFFERENCE
-        ),
+            -(SIBLING_WEIGHT * (b in siblings[a]) + nearby[a].get(b, 0)),
+            delta_e(colors[a], colors[b]),
+            names[a],
+            names[b],
+        )
+        for a in neighbours
+        for b in siblings[a] | nearby[a].keys()
+        if a < b and delta_e(colors[a], colors[b]) < LOOK_ALIKE
     )
     print(
-        f"{sum(len(o) for o in nearby.values()) // 2} nearby pairs, "
-        f"{len(similar)} with similar colours (ΔE2000 < "
-        f"{MIN_NEIGHBOUR_DIFFERENCE}), "
-        f"total weight {-sum(w for w, *_ in similar):.1f}, nearest:"
+        f"{len(look_alikes)} pairs of siblings or nearby countries with "
+        f"look-alike colours (ΔE2000 < {LOOK_ALIKE}), "
+        f"total weight {-sum(w for w, *_ in look_alikes):.1f}, worst:"
     )
-    for w, d, a, b in similar[:6]:
+    for w, d, a, b in look_alikes[:6]:
         print(f"  weight {-w:.2f}  ΔE {d:4.1f}  {a} – {b}")
 
 
